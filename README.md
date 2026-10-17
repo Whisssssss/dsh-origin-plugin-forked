@@ -16,6 +16,7 @@
 
 | 渠道 | 状态 |
 |---|---|
+| 🟢 **OriginPilot 一体化整合包** | [Fantasality/originpilot](https://github.com/Fantasality/originpilot) —— **新手首选：零命令行、零配置，解压双击即用**（内置 Node/Python 运行时 + 本插件全部能力） |
 | 🟢 **npm 官方源** | [dsh-origin-plugin](https://www.npmjs.com/package/dsh-origin-plugin) —— `npm i -g dsh-origin-plugin`（默认最新版） |
 | 🟢 **npmmirror 淘宝镜像** | [镜像页](https://npmmirror.com/package/dsh-origin-plugin) —— 国内加速，自动同步 |
 | 🟢 **GitHub Release** | [Releases](https://github.com/Fantasality/dsh-origin-plugin/releases) —— 源码 tgz + 说明 |
@@ -33,6 +34,12 @@
 > ## 🚀 [**👉 点这里：快速上手（小白版）· 4 种用法 1-3 分钟跑通 👈**](QUICKSTART.md)
 >
 > ### 😵 看不懂？把 [这个文件](skills/install-dsh-origin/SKILL.md) 发给你的 AI，说「按手册帮我装」就行。
+>
+> ### 🖥️ 还是嫌麻烦？**别装了，直接用 [OriginPilot](https://github.com/Fantasality/originpilot)** ——
+> 本插件的 **Windows 便携一体化整合包**：下载 → 解压 → 双击 `OriginPilot.exe` → 填 API Key，
+> 自然语言直接出图。内置 Node/Python 运行时与本插件全部 70+ 工具，
+> **零安装、零配置、零命令行**，专为新手打造。
+> 本仓库（插件本体）面向开发者与已有 DSH/MCP 环境的用户——两条发行线互不阻塞、版本解耦。
 
 [English version here](README.en.md)
 
@@ -595,6 +602,31 @@ node smoke\mcp_handshake_test.mjs
 
 设置 `ORIGIN_MCP_PROFILE=compact` 可从工具集隐藏统计批（ttest/anova/pca/survival），
 适合只需要画图+基础分析的场景；其余 39 个工具不变。
+
+## 📈 npm 下载量趋势
+
+![npm 下载数趋势（日下载 + 7 日均线）](docs/npm_downloads_trend.png)
+
+**动态下载量**（[npm 官方数据](https://api.npmjs.org/downloads/point/last-month/dsh-origin-plugin)，实时更新）：
+
+| 口径 | 下载量 |
+|---|---|
+| 最近 7 天 | [![weekly](https://img.shields.io/npm/dw/dsh-origin-plugin?style=flat-square&label=%20)](https://www.npmjs.com/package/dsh-origin-plugin) |
+| 最近 30 天 | [![monthly](https://img.shields.io/npm/dm/dsh-origin-plugin?style=flat-square&label=%20)](https://www.npmjs.com/package/dsh-origin-plugin) |
+| 最近一年 | [![yearly](https://img.shields.io/npm/dy/dsh-origin-plugin?style=flat-square&label=%20)](https://www.npmjs.com/package/dsh-origin-plugin) |
+| 累计总量 | [![total](https://img.shields.io/npm/dt/dsh-origin-plugin?style=flat-square&label=%20)](https://www.npmjs.com/package/dsh-origin-plugin) |
+
+**关键节点**（数据截至 2026-10-12，来自 npm 官方 API）：
+
+- **2026-08-19 npm 首发**：首日下载 450 次；
+- **2026-09-16 ~ 09-18**：v2.6 → v2.7 密集发版（含 issue #1 P0 热修），单日峰值 **591 次**（09-16），当周 1,823 次；
+- **发版潮后稳定在 600+ 次/周**——为收录前基线（~160 次/周）的 **4 倍**，且已持续 3 周以上；
+- 发布 8 周，npm 累计下载 **5,554 次**。
+
+> 📌 交互式趋势：[npm-stat.com](https://npm-stat.com/charts.html?package=dsh-origin-plugin) ·
+> [npm trends](https://www.npmtrends.com/dsh-origin-plugin) ·
+> [npmmirror 镜像同步量](https://npmmirror.com/package/dsh-origin-plugin)。
+> 另有 GitHub Releases / dshfind / DSH 1024Store 渠道下载未计入上述 npm 数据。
 
 ## License
 
