@@ -36,6 +36,7 @@ const load = (rel) => import(pathToFileURL(join(nm, ...rel.split('/'))).href)
 
 const { Context } = await load('@deepseek-ai/cordis/lib/index.js')
 const Commands = (await load('@deepseek-ai/dsh-commands/lib/index.js')).default
+const format = await load('@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js')
 const plugin = (await import(pathToFileURL(join(repoRoot, 'index.js')).href)).default
 
 const ctx = new Context()
@@ -75,10 +76,32 @@ check('execute returns success', execution?.result?.kind === 'success', executio
 check('command lifecycle logged (run/done)', lifecycle.map((e) => e.type).join(',') === 'command/run,command/done', lifecycle.map((e) => e.type).join(','))
 check('steers exactly one message', steered.length === 1, 'got ' + steered.length)
 check('steer target is user role', steered[0]?.role === 'user', steered[0]?.role)
-check('steer source is plugin', steered[0]?.source?.kind === 'plugin', JSON.stringify(steered[0]?.source))
+check('steer source is producer-owned (origin-command)', steered[0]?.source?.kind === 'origin-command', JSON.stringify(steered[0]?.source))
 const text = steered[0]?.content?.[0]?.text
 check('prompt carries the request', typeof text === 'string' && text.includes('UV-Vis 吸收谱'))
 check('prompt carries the workflow', typeof text === 'string' && text.includes('origin_help'))
+
+// 会话格式 v4 的 source 准入：这是线上真实踩过的坑——
+// {kind:'plugin', plugin:...} 会被拒（format v4 message requires a producer-owned source kind）。
+let admitted = true
+try {
+  format.assertV4RowAdmission({ type: 'user/message', data: steered[0] })
+} catch (error) {
+  admitted = false
+  console.log('    admission error:', error.message)
+}
+check('steered message passes session-format v4 source admission', admitted)
+
+let legacyRejected = false
+try {
+  format.assertV4RowAdmission({
+    type: 'user/message',
+    data: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin', plugin: 'dsh-origin-plugin' } },
+  })
+} catch {
+  legacyRejected = true
+}
+check('retired plugin wrapper is rejected by v4 admission (regression guard)', legacyRejected)
 
 console.log(failures === 0 ? 'RESULT: PASS' : 'RESULT: FAIL (' + failures + ')')
 process.exit(failures === 0 ? 0 : 1)

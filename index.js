@@ -127,8 +127,11 @@ export function registerOriginCommand(ctx) {
               { type: 'text', text: buildOriginCommandPrompt(request, { files, images: imageCount }) },
               ...blocks,
             ],
-            // 插件来源（DSH 的 MessageSource 为可合并扩展；dsh-imagegen 用同款写法）
-            source: { kind: 'plugin', plugin: 'dsh-origin-plugin' },
+            // 来源必须写"生产者自己的 kind"：DSH 的 session 格式 v4 已停用
+            // {kind:'plugin', plugin:...} 这种旧包装（会报
+            // "format v4 message requires a producer-owned source kind"）。
+            // 直接用本插件专属 kind；未知 kind 由 UI 按通用来源降级渲染。
+            source: { kind: 'origin-command' },
           })
         } catch (error) {
           const reason = error && error.message ? error.message : String(error)

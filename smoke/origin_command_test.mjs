@@ -98,7 +98,8 @@ check('steers exactly one message', steered.length === 1, 'got ' + steered.lengt
 
 const message = steered[0] || {}
 check('steered message is user role', message.role === 'user', message.role)
-check('steered message has plugin source', Boolean(message.source && message.source.kind === 'plugin'), JSON.stringify(message.source))
+check('steered message uses a producer-owned source kind', Boolean(message.source && message.source.kind === 'origin-command'), JSON.stringify(message.source))
+check('steered message never uses the retired plugin wrapper', message.source?.kind !== 'plugin')
 check('steered message has a unique id', typeof message.id === 'string' && message.id.length > 0)
 const text = message.content && message.content[0] && message.content[0].text
 check('prompt carries the user request', typeof text === 'string' && text.includes('UV-Vis 吸收谱'))

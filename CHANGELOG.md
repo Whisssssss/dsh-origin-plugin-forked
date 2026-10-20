@@ -14,6 +14,11 @@
   - **支持附件**：声明 `input.attachments` 后，CSV/XLSX 等文件块随 steer 消息发给模型
     （文件块被 DSH 投影成"只读副本路径"，模型用 `origin_load_file` 导入）；
     图片块原样透传但仅作参考，不凭图估算数值。
+- **修复 `/origin` 触发整轮失败**：注入消息最初沿用已停用的 `{kind:'plugin', plugin:…}`
+  旧来源包装，DSH 0.2.x 的 session 格式 v4 会拒收并让整轮报
+  `format v4 message requires a producer-owned source kind`。改为插件专属
+  `source: { kind: 'origin-command' }`；集成冒烟新增 v4 source 准入回归断言
+  （同时断言旧包装确实会被拒）。
 - **修复 Ctrl+C 误报**：DSH 停机/重启时控制台会把 Ctrl+C 广播给子进程，
   MCP server 原先会从 stdio 读循环抛出 `KeyboardInterrupt` traceback（看着像崩溃）。
   新增 `main()` 入口统一捕获并静默退出，附离线单测。
