@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.8.0 (2026-10-21) — `/origin` 斜杠指令 + DSH 0.2.x 排障沉淀
+
+### 新增
+- **DSH 斜杠指令 `/origin [需求]`**：在对话里直接表明"要用 Origin 作图"，
+  不必再手写长提示词。命令把工作流纪律（先 `origin_help`、歧义先问、
+  快路径 `origin_figure`、交付前 `verify/view`、不虚构数据）交给模型并起一轮对话。
+  - 全局命令（所有 agent 可见）；空参数时只进入作图模式并先反问需求。
+  - 命令本身按 DSH 语义**对模型不可见**，因此用 `agent.steer()` 注入一条
+    user-role 消息（与 dsh-imagegen 的写法一致），而非依赖命令行本身。
+  - 通过可选注入 `ctx.commands` 注册：没有 commands 服务的旧运行时自动跳过，
+    不影响插件加载（无新增运行时依赖）。
+- `smoke/origin_command_test.mjs`：离线冒烟（不依赖 Origin / DSH），覆盖注册、
+  参数、steer 消息、空输入、缺少 commands/steer 的降级路径与卸载 disposer。
+- `smoke/origin_command_integration.mjs`：用本机 DSH 的真实 `@deepseek-ai/dsh-commands`
+  注册并执行一次 `/origin`，验证「命令 → handler → `agent.steer`」全链路（需本机 DSH）。
+
+### 文档（排障沉淀）
+- `COMPATIBILITY.md` 新增 **§7 DSH 运行时兼容（0.2.x）**：`dsh-mcp-client` 版本错代
+  导致运行时把 `mcp-origin` 整行禁用（`disabling profile plugin row "mcp-origin" …`）、
+  根因与修复，以及"系统 Python 缺 mcp/originpro → 工具静默不注册"的判别与处置。
+- 已知失败场景表补 **#16 版本错代**、**#17 Python 依赖缺失/静默失败**。
+- `README.md` 增加 `/origin` 用法与 DSH 版本对齐提示；`AGENTS.md` 补一行指令说明。
+
+### 兼容
+- 运行时依赖不变（仍只依赖 `@deepseek-ai/dsh-mcp-client`）；旧 DSH 上 `/origin` 自动不出现。
+
 ## 2.7.3 (2026-09-18) — 热修（P0）
 
 **修复 issue #1：装了插件后 DSH 完全无法启动（`TypeError: Invalid effect`）。**

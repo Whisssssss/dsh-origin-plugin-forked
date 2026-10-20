@@ -166,7 +166,13 @@ dsh plugin add dsh-origin-plugin
 **v2.0.3 起自动携带运行时依赖 `@deepseek-ai/dsh-mcp-client`**：市场安装
 （`dsh plugin add`）会把它作为传递依赖装进 profile 的 node_modules——缺少它时 loader
 无法按 `name` 解析该条目，工具会**静默永不注册**（DSH 照常启动、无任何报错）。
-**v2.0.2 起 bundle 默认已自定位**：server 绝对路径由 `!!js` 在启动时按
+
+> ⚠️ **版本必须与 DSH 同号**：`dsh-mcp-client` 的 peer 范围绑定 DSH 大版本
+> （0.1.x ↔ 0.1.x，0.2.x ↔ 0.2.x）。错代时 DSH 会在启动阶段**整行禁用** `mcp-origin`
+> （报 `... is incompatible with dsh ...`），表现和"没装"完全一样。修复步骤见
+> [COMPATIBILITY.md](COMPATIBILITY.md) §7。
+
+**v2.0.2 起 bundle 已自定位**：server 绝对路径由 `!!js` 在启动时按
 `<DSH_HOME>/profiles/web/node_modules/dsh-origin-plugin/` 计算（DSH_HOME 缺省回退
 `%USERPROFILE%/.dsh`），不再受进程工作目录影响；默认用系统 `python` 启动
 `origin_mcp_server.py`。
@@ -232,6 +238,25 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 > 机制说明：DSH 的插件生态是 Cordis 插件树 + `cordis.patch.yml` patch 层；MCP 服务器是官方
 > 一等公民——`dsh-mcp-client` 会自动把外部 MCP 工具桥接为原生工具
 > （名称 `mcp__<serverName>__<rawName>`），无需编写 TypeScript 插件即可接入 Python 能力。
+
+### 3.1 斜杠指令 `/origin`（DSH，v2.8.0+）
+
+在 DSH 对话里直接表明"要用 Origin 作图"，不用再手写长提示词：
+
+```text
+/origin 用这批 UV-Vis 数据画吸收谱，标注 280 nm 处的峰
+/origin
+```
+
+它做两件事：把「用 Origin 绘图」的意图 + 工作流纪律（先 `origin_help`、数据含义有歧义先问、
+快路径 `origin_figure`、交付前 `origin_verify_graph`/`origin_view_graph`、不虚构数据）
+交给模型；然后起一轮对话。命令是**全局**的，任何 agent 都能用；空参数时只进入作图模式，
+助手会先反问你画什么。
+
+- 命令列表里搜 `origin` 即可看到（描述：用 Origin MCP 插件完成本次作图/分析请求）。
+- 旧版 DSH（没有 `commands` 服务）上该命令自动不出现，不影响插件加载。
+- 若命令不出现或工具缺失，先看 [COMPATIBILITY.md](COMPATIBILITY.md) §7：DSH 0.2.x
+  必须搭配同号的 `@deepseek-ai/dsh-mcp-client`，否则 `mcp-origin` 整行会被运行时禁用。
 
 ### 4. 对话触发示例
 

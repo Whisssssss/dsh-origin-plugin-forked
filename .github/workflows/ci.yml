@@ -39,6 +39,9 @@ jobs:
       - name: Pytest (live tests auto-skip without Origin)
         run: python -X utf8 -m pytest tests/ -q
 
+      - name: Slash command smoke (/origin, no Origin/DSH needed)
+        run: node smoke/origin_command_test.mjs
+
       - name: Skill consistency (no phantom tools)
         run: python -X utf8 -c "import re,importlib.util,pathlib,sys;spec=importlib.util.spec_from_file_location('oms','origin_mcp_server.py');m=importlib.util.module_from_spec(spec);sys.modules['oms']=m;spec.loader.exec_module(m);names=set(m._build_tool_registry());
 # 白名单：错误码与非工具的模块名/脚本名（会被 origin_* 正则误抓）
