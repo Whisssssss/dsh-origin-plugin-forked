@@ -58,7 +58,8 @@
 - 🎛 **细粒度改图**：`origin_edit_plot/axis/legend/page` —— 只换一条线的颜色、加粗、隐藏、挪图例、改轴范围、调纸张尺寸；`origin_manage_pages` 关窗/改名；`origin_inspect_graph` 先看清现状
 - 📂 **文件导入**：`origin_load_file` 直接读 CSV/TXT/XLSX/XLS（中文路径/编码安全）
 - 🧩 **领域模板**：多谱线堆叠偏移 / XRD 三件套 / 双Y轴 / 森林图 / 多面板（`origin_plot_template`）
-- 📦 **可信交付**：`origin_export_delivery` 一键交付目录（图片+数据csv+**可编辑 OPJU**）；`origin_save_project` 单独存工程；`DSH_ORIGIN_NO_AUTO_SAVE=1` 可禁自动写 .opju（提示 Ctrl+S）
+- 📦 **默认只交付 OPJU**：最终产物是可编辑工程 `origin_save_project`，**图片/PPT 由用户自行导出**；
+  仅在明确要求时才用 `origin_export_delivery`（图片+数据csv+OPJU）或 `origin_export`；`DSH_ORIGIN_NO_AUTO_SAVE=1` 可禁自动写 .opju（提示 Ctrl+S）
 - ✨ **期刊级排版**：`style_mode`(journal/presentation) + `family` 调色板（带使用约束）+ 幂等 `graph_name` + 语义轴标题 + `style_overrides` 显式样式逐项回报
 - 👁 **双保险校验**：`origin_view_graph` 内联图片（模型看、也能带给用户）+ `origin_verify_graph` 确定性反读（程序核）
 - 🧮 **统计批**：t 检验 / ANOVA / PCA / Kaplan-Meier 生存分析（纯 numpy 自研，结果带 `confidence_note`：仅供探索，正式发表用 SPSS/R/Origin 复核）
@@ -273,9 +274,9 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 
 | 你说 | 模型会调用 |
 |---|---|
-| 「用 Origin 画 y=x²（x=1..10）的折线图，导出 PNG」 | `mcp__origin__origin_plot_file` |
-| 「把这两列数据画成散点图导出 SVG：x=[1,2,3,4,5], y=[3.1,4.9,7.2,8.8,11.3]」 | `mcp__origin__origin_plot_file` |
-| 「先写数据再分步画图、导出」 | `origin_write_data` → `origin_plot` → `origin_export` |
+| 「用 Origin 画 y=x²（x=1..10）的折线图」 | `origin_write_data` → `origin_plot` → `origin_view_graph` → `origin_save_project`（默认只给 OPJU） |
+| 「把这两列数据画成散点图，导出 SVG」 | `origin_plot` → `origin_export`（用户明确要图片时才导出） |
+| 「画完只给我 OPJU 工程文件」 | `origin_plot` → `origin_save_project` |
 
 ## 快速上手（skill + origin_help）
 
@@ -328,8 +329,8 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 | `origin_execute_plan` | **执行计划**（按 plan_id 写数→画图→导出） | `plan_id` |
 | `origin_plot_template` | **领域模板**：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel | `template_id`, `data` |
 | `origin_verify_graph` | **确定性反读**（轴标题/字号/几何/图例/文件完整性） | `graph`, `expected_*` |
-| `origin_save_project` | **保存可编辑 OPJU 工程** | `path` |
-| `origin_export_delivery` | **一键交付目录**（源文件同级，图片+OPJU+核验） | `graph`, `source_path`, `fmts` |
+| `origin_save_project` | **保存可编辑 OPJU 工程（默认交付物）** | `path` |
+| `origin_export_delivery` | 一键交付目录（图片+OPJU+核验；**仅用户明确要图片时**） | `graph`, `source_path`, `fmts` |
 | `origin_list_pages` | **列出全部页面**（图页/工作簿）+ 活动窗口 | 无 |
 | `origin_inspect_graph` | **巡检现状**：图层几何/曲线样式/轴/图例/页面尺寸 | `graph` |
 | `origin_edit_plot` | **逐条改曲线**：颜色/线宽/线型/符号/透明度/隐藏 | `graph`, `edits` |

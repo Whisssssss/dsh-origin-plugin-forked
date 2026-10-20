@@ -31,6 +31,9 @@
    （错误码 `test_attach_blocked`）；要跑真机测试先关闭 Origin，再设
    `ORIGIN_SESSION=isolated` 与 `DSH_ORIGIN_LIVE_TESTS=1`。清理只能用 baseline 差集
    （`origin_pages_gc(baseline=[...])`），禁止 closeAll。
+9. **最终交付只给 OPJU 源文件**：默认只调 `origin_save_project(path)`，回复里给 OPJU 路径；
+   **不要主动导出图片/PPT/交付目录**——图片由用户自行导出。自检用 `origin_view_graph`
+   （内联，不落盘）或 `origin_verify_graph`（读回，不落盘）。只有用户明确要图片时才导出。
 
 ---
 

@@ -74,8 +74,9 @@ export function buildOriginCommandPrompt(rawInput, attachments) {
     '【Origin 作图模式】用户通过 /origin 指令要求使用 Origin MCP 插件（mcp__origin__* 工具）完成作图或数据分析。',
     '工作流程：',
     '1) 先调 origin_help 了解工具与模板；数据含义不确定时先 origin_plot_plan，返回的 questions 非空时先向用户确认。',
-    '2) 主路径用 origin_figure（写数→画图→验证→导出一次完成）；复用已有文件时用 origin_load_file + origin_plot + origin_export。',
-    '3) 交付前用 origin_verify_graph / origin_view_graph 自检；需要可编辑工程时 origin_save_project。',
+    '2) 主路径：origin_write_data / origin_load_file → origin_plot（只建图，不导出文件）。',
+    '3) 自检用 origin_verify_graph（读回）或 origin_view_graph（内联预览，不落盘）。',
+    '4) 最终交付只保存 OPJU：origin_save_project(path)。不要导出图片/PPT/交付目录（图片由用户自行导出）；只有用户明确要图片时才用 origin_export / origin_export_delivery。',
     '约束：只使用真实数据，不虚构或补造数值；首次连接 Origin 可能耗时 5~45 秒。',
   ].join('\n')
   const extra = []

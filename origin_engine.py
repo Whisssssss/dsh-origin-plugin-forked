@@ -3050,11 +3050,19 @@ def _help_impl():
     """快速使用速查（不连接 Origin，秒回）。模型画图前调用一次即可上手。"""
     return {
         "ok": True,
+        "delivery_policy": {
+            "mode": "opju_only",
+            "rule": "最终交付只保存可编辑 OPJU（origin_save_project）。"
+                    "不要主动导出图片/PPT/交付目录——图片由用户自行导出。",
+            "unless": "用户明确要求图片/PPT/完整交付目录时，才用 "
+                      "origin_export / origin_export_pptx / origin_export_delivery。",
+            "self_check": "自检用 origin_view_graph（内联渲染，不落盘）或 "
+                          "origin_verify_graph（读回，不落盘）。",
+        },
         "usage": (
-            "最快路径：origin_plot_file(columns={'x':[...], 'y':[...]}, "
-            "plot_type='line'|'scatter'|'line_symbol'|'column', fmt='png'|'svg', "
-            "file_path='可选绝对路径', width=1200, title='可选') -> "
-            "返回 {'ok': true, 'file': '绝对路径'}。"
+            "推荐路径：origin_write_data / origin_load_file -> origin_plot（只建图，不导出）"
+            " -> origin_view_graph 自检 -> origin_save_project 保存 OPJU。"
+            "仅在用户明确要图片时才调用 origin_export / origin_plot_file / origin_figure 的导出。"
         ),
         "data_format": {
             "columns": "dict {列名: [数值列表]}，第一列自动设为 X，其余为 Y；也可传二维列表 [[..],[..]] 或一维列表",
@@ -3066,14 +3074,14 @@ def _help_impl():
             "origin_write_data": "写多列数据 -> 返回 worksheet",
             "origin_load_file": "导入本地表格文件（CSV/TXT/XLSX/XLS，中文路径/编码安全）-> 返回 worksheet+列画像",
             "origin_plot": "画图（含 histogram/box/bar + yerr_column 误差棒 + style_overrides 显式样式）-> 返回 graph",
-            "origin_export": "导出 PNG/SVG/PDF/TIF/EMF -> 返回 file 绝对路径",
-            "origin_plot_file": "一键 写数+画图+导出 -> 返回 file（最常用）",
+            "origin_export": "导出 PNG/SVG/PDF/TIF/EMF（仅在用户明确要图片时用）",
+            "origin_plot_file": "一键 写数+画图+导出（仅在用户明确要图片时用；默认交付请走 origin_plot + origin_save_project）",
             "origin_plot_plan": "绘图计划（离线秒回）：逐列画像+角色建议+元素清单+待确认问题 -> plan_id",
             "origin_execute_plan": "按 plan_id 执行计划（写数+画图+导出），不确定列应先经用户确认",
             "origin_plot_template": "领域模板：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel",
             "origin_verify_graph": "确定性反读核验（轴标题/字号/图层几何/图例/文件完整性），与 view_graph 互补",
-            "origin_save_project": "保存当前项目为可编辑 OPJU",
-            "origin_export_delivery": "一键交付：源文件同级建 <数据名>_Origin_<时间戳>/ 收纳图片+OPJU 并核验",
+            "origin_save_project": "保存当前项目为可编辑 OPJU（默认最终交付物）",
+            "origin_export_delivery": "一键交付目录（图片+OPJU；仅在用户明确要图片时用）",
             "origin_filter_data": "删点/裁剪（drop_rows 索引 或 x_min/x_max）",
             "origin_fit": "拟合 kind=linear 或 Origin 函数名(ExpDec1/Gauss/Polynomial/...)，拟合曲线上图",
             "origin_plot3d": "3D surface(需 {'z': 2D网格}) / scatter(需 {'x','y','z'})",

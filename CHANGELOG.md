@@ -5,7 +5,7 @@
 ### 新增
 - **DSH 斜杠指令 `/origin [需求]`**：在对话里直接表明"要用 Origin 作图"，
   不必再手写长提示词。命令把工作流纪律（先 `origin_help`、歧义先问、
-  快路径 `origin_figure`、交付前 `verify/view`、不虚构数据）交给模型并起一轮对话。
+  快路径 `origin_plot`、交付前 `verify/view`、最终只交付 OPJU、不虚构数据）交给模型并起一轮对话。
   - 全局命令（所有 agent 可见）；空参数时只进入作图模式并先反问需求。
   - 命令本身按 DSH 语义**对模型不可见**，因此用 `agent.steer()` 注入一条
     user-role 消息（与 dsh-imagegen 的写法一致），而非依赖命令行本身。
@@ -14,6 +14,11 @@
   - **支持附件**：声明 `input.attachments` 后，CSV/XLSX 等文件块随 steer 消息发给模型
     （文件块被 DSH 投影成"只读副本路径"，模型用 `origin_load_file` 导入）；
     图片块原样透传但仅作参考，不凭图估算数值。
+- **交付策略改为「只交付 OPJU」**：最终产物只保存可编辑工程（`origin_save_project`），
+  **不主动导出图片/PPT/交付目录**——图片由用户自行导出；只有用户明确要求时才走
+  `origin_export` / `origin_export_pptx` / `origin_export_delivery`。
+  `origin_help` 新增 `delivery_policy` 字段；`/origin` 提示词、`origin-plotting` skill、
+  AGENTS 规则与 README 同步更新。
 - **修复 `/origin` 触发整轮失败**：注入消息最初沿用已停用的 `{kind:'plugin', plugin:…}`
   旧来源包装，DSH 0.2.x 的 session 格式 v4 会拒收并让整轮报
   `format v4 message requires a producer-owned source kind`。改为插件专属
