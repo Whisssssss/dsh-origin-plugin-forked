@@ -1987,8 +1987,15 @@ def _sync_stdio_server():
             }})
 
 
-if __name__ == "__main__":
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+def main(argv=None):
+    """进程入口（独立出来便于离线单测）。
+
+    DSH 停机/重启时，控制台的 Ctrl+C 会广播给同一控制台组里的子进程；
+    此前它会从 stdio 读循环里冒出来，打印一整段 KeyboardInterrupt traceback
+    （看起来像服务器崩了，实际只是正常关闭）。这里统一静默退出。
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    arg = args[0] if args else ""
     if arg == "--offline-test":
         _offline_test()
     elif arg == "--selftest":
@@ -2000,4 +2007,12 @@ if __name__ == "__main__":
     elif arg == "--json-echo":  # 供外部快速探测
         print(json.dumps({"server": "origin", "ok": True, "version": "2.2.2"}))
     else:
-        _sync_stdio_server()
+        try:
+            _sync_stdio_server()
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

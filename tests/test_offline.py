@@ -115,3 +115,25 @@ def test_tool_catalog_structure():
     blocks = re.findall(r'"name":\s*"(origin_[a-z0-9_]+)"', src)
     for n in set(blocks):
         assert n in names, f"目录条目 {n} 未注册"
+
+
+# ---------------------------------------------------------------------------
+# 进程入口：Ctrl+C 静默退出（DSH 停机/重启时控制台会把 Ctrl+C 广播给子进程）
+# ---------------------------------------------------------------------------
+def test_main_swallows_keyboard_interrupt(monkeypatch):
+    import origin_mcp_server as oms
+
+    def boom():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(oms, "_sync_stdio_server", boom)
+    assert oms.main([]) == 0
+
+
+def test_main_still_dispatches_flags(monkeypatch, capsys):
+    import origin_mcp_server as oms
+
+    called = []
+    monkeypatch.setattr(oms, "_selftest", lambda: called.append("selftest"))
+    oms.main(["--selftest"])
+    assert called == ["selftest"]

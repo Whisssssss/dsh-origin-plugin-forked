@@ -54,6 +54,8 @@ check('plugin exports apply()', Boolean(plugin && typeof plugin.apply === 'funct
 
 const descriptors = ctx.commands.list({})
 check('origin command is registered globally', descriptors.some((d) => d.name === 'origin'), JSON.stringify(descriptors.map((d) => d.name)))
+const definition = ctx.commands.find({}, 'origin')
+check('command advertises attachment input', definition?.input?.attachments === true, JSON.stringify(definition?.input))
 
 const steered = []
 const lifecycle = []

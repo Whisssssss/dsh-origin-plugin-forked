@@ -11,8 +11,14 @@
     user-role 消息（与 dsh-imagegen 的写法一致），而非依赖命令行本身。
   - 通过可选注入 `ctx.commands` 注册：没有 commands 服务的旧运行时自动跳过，
     不影响插件加载（无新增运行时依赖）。
+  - **支持附件**：声明 `input.attachments` 后，CSV/XLSX 等文件块随 steer 消息发给模型
+    （文件块被 DSH 投影成"只读副本路径"，模型用 `origin_load_file` 导入）；
+    图片块原样透传但仅作参考，不凭图估算数值。
+- **修复 Ctrl+C 误报**：DSH 停机/重启时控制台会把 Ctrl+C 广播给子进程，
+  MCP server 原先会从 stdio 读循环抛出 `KeyboardInterrupt` traceback（看着像崩溃）。
+  新增 `main()` 入口统一捕获并静默退出，附离线单测。
 - `smoke/origin_command_test.mjs`：离线冒烟（不依赖 Origin / DSH），覆盖注册、
-  参数、steer 消息、空输入、缺少 commands/steer 的降级路径与卸载 disposer。
+  附件声明与透传、参数、steer 消息、空输入、缺少 commands/steer 的降级路径与卸载 disposer。
 - `smoke/origin_command_integration.mjs`：用本机 DSH 的真实 `@deepseek-ai/dsh-commands`
   注册并执行一次 `/origin`，验证「命令 → handler → `agent.steer`」全链路（需本机 DSH）。
 

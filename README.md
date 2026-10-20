@@ -253,6 +253,17 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 交给模型；然后起一轮对话。命令是**全局**的，任何 agent 都能用；空参数时只进入作图模式，
 助手会先反问你画什么。
 
+**数据可以直接作为附件带上**（CSV / TXT / TSV / XLSX / DAT 等）：
+
+```text
+（先在输入框点附件，选 data.csv，再输入：）
+/origin 把这批数据画成折线图，X 用 wavelength 列
+```
+
+附件会以**只读副本**随命令消息发给模型（DSH 会把文件块投影成"只读路径"文本），
+模型用 `origin_load_file` 导入后再作图，不会凭文件名臆测内容。图片附件只作参考：
+如果图里是数据表格，助手会要求你提供 CSV/XLSX 源文件，而不是凭图估算数值。
+
 - 命令列表里搜 `origin` 即可看到（描述：用 Origin MCP 插件完成本次作图/分析请求）。
 - 旧版 DSH（没有 `commands` 服务）上该命令自动不出现，不影响插件加载。
 - 若命令不出现或工具缺失，先看 [COMPATIBILITY.md](COMPATIBILITY.md) §7：DSH 0.2.x
