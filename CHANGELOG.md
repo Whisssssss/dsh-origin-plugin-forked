@@ -27,6 +27,29 @@
 - `smoke/origin_command_integration.mjs`：用本机 DSH 的真实 `@deepseek-ai/dsh-commands`
   注册并执行一次 `/origin`，验证「命令 → handler → `agent.steer`」全链路（需本机 DSH）。
 
+### 修复（P0）：测试/smoke 不得污染用户 Origin 工程
+
+> 真机事故：在用户已打开工程的机器上跑 `pytest tests/`，attach 模式把
+> `Contour*`/`Graph*`/`M*` 等测试页写进用户工程，随后全量保存让工程 21 KB → 400 KB。
+
+- **引擎级防污染守卫**（`origin_engine._test_attach_guard`）：识别 pytest 与
+  `smoke/`、`tests/` 脚本；attach 模式下**拒绝连接**（新错误码
+  `test_attach_blocked`，零副作用），只有显式 `DSH_ORIGIN_ALLOW_ATTACH_TESTS=1`
+  才放行。正常 MCP 作图任务（非测试进程）不受影响。
+- **测试绝不杀用户 Origin**：`tests/conftest.py` 固定 `DSH_ORIGIN_AUTOKILL=0`；
+  隔离模式连接时引擎也强制关闭 autokill；测试进程退出时只清理"它自己启动的" Origin PID。
+- **真机用例默认跳过**（`tests/test_live.py`）：需显式
+  `DSH_ORIGIN_LIVE_TESTS=1` + 建议 `ORIGIN_SESSION=isolated`；fixture 记录 baseline
+  页面快照，收尾**只关闭本次新增页**并断言页面集合回到 baseline（失败/中断也清理）。
+- **测试产物不落用户目录**：新增 `DSH_ORIGIN_OUTPUT_DIR` 支持；测试/冒烟进程默认
+  输出到 `%TEMP%\dsh-origin-tests\output`。
+- **`origin_save_project` 返回实际保存页清单**（`pages`/`pages_count`）；传入
+  `pages`/`exclude` 时明确回报 `ignored_selection` + warning（当前版本只支持全量保存）。
+- **`origin_pages_gc` 支持基线清理**：`baseline=[...]` 时只删快照之后新增的页面，
+  不 closeAll、不动用户原有页面（人工补救与测试收尾都用它）。
+- 文档：`COMPATIBILITY.md` 新增 **§8 测试与 smoke 不得污染用户工程**；
+  `AGENTS.md` 增加硬规则第 8 条；新增 `smoke/README.md` 写明隔离跑法。
+
 ### 文档（排障沉淀）
 - `COMPATIBILITY.md` 新增 **§7 DSH 运行时兼容（0.2.x）**：`dsh-mcp-client` 版本错代
   导致运行时把 `mcp-origin` 整行禁用（`disabling profile plugin row "mcp-origin" …`）、

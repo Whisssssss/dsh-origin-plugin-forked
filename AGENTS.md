@@ -27,6 +27,10 @@
 6. **读回不是证据**：返回值里的 `proof_level` 三级——
    `verified`（写入且读回一致）才能当证据；`readback_only` 需目视确认；`unverified` 必须调 `origin_view_graph` 看图。
 7. **引用原样传递**：`origin_write_data` / `origin_load_file` 返回 `worksheet`，`origin_plot*` 返回 `graph`，后续直接传返回值。
+8. **测试/冒烟不碰用户工程**：pytest 与 `smoke/` 脚本在 attach 模式下会被引擎拒绝
+   （错误码 `test_attach_blocked`）；要跑真机测试先关闭 Origin，再设
+   `ORIGIN_SESSION=isolated` 与 `DSH_ORIGIN_LIVE_TESTS=1`。清理只能用 baseline 差集
+   （`origin_pages_gc(baseline=[...])`），禁止 closeAll。
 
 ---
 

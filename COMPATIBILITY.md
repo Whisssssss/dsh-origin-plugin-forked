@@ -144,3 +144,37 @@ python -m venv "%USERPROFILE%\dsh_origin_plugin\.venv"
 1. `origin_diagnose` 返回 `engine_connected: true`（首次会自动拉起 Origin，5~45 秒）；
 2. 对话工具列表出现 `mcp__origin__*`；
 3. 输入 `/origin`（v2.8.0+）应出现命令补全，并回一句"已进入 Origin 作图模式"。
+
+## 8. 测试与 smoke 不得污染用户 Origin 工程（v2.8.0）
+
+> 实测事故：在用户已打开工程的机器上跑 `pytest tests/`，attach 模式直接连到同一个
+> Origin 实例，把 `Contour*`/`Graph*`/`M*` 等测试页写进用户工程；随后
+> `origin_save_project` 全量保存，工程从 21 KB 膨胀到 400 KB。
+
+### 硬规则
+
+1. **测试/冒烟不得在 attach 实例上建页**。v2.8.0 起 `origin_engine._connect_impl`
+   会识别 pytest / `smoke/`、`tests/` 脚本：attach 模式下**直接拒绝连接**
+   （错误码 `test_attach_blocked`，零副作用）；只有显式
+   `DSH_ORIGIN_ALLOW_ATTACH_TESTS=1` 才放行。
+2. 测试进程**永远不会** `taskkill` 用户 Origin：`tests/conftest.py` 固定
+   `DSH_ORIGIN_AUTOKILL=0`；isolation 模式下引擎也会强制关掉 autokill。
+3. 真机用例默认跳过，需显式准入（见 `tests/test_live.py` 文件头）：
+   ```bat
+   set ORIGIN_SESSION=isolated
+   set DSH_ORIGIN_LIVE_TESTS=1
+   python -m pytest tests/test_live.py -v
+   ```
+   收尾按 baseline 差集只关闭本次新增页，并断言页面集合回到 baseline。
+4. 测试导出目录用 `DSH_ORIGIN_OUTPUT_DIR` 指到临时目录；测试/冒烟进程默认落到
+   `%TEMP%\dsh-origin-tests\output`，不会写进 `~/dsch_origin_plugin/output`。
+5. 人工补救（怀疑工程已被测试污染时）：先用
+   `origin_pages_gc(dry_run=true, baseline=[...])` 看差集，再
+   `dry_run=false` 只删新增页。**绝不要 closeAll**，也不要把用户自己的同名页
+   （如 `Contour*`）当垃圾删掉。
+
+### 为什么不能用 closeAll 清理
+
+`origin_pages_gc(dry_run=false)` 不带 baseline 时仍是 closeAll（历史行为，适合空工程）；
+带 baseline 时才只删"快照之后新增"的页面。判断哪些页是测试建出来的只能靠 baseline
+快照，不能靠名字模式匹配。

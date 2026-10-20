@@ -561,12 +561,16 @@ def origin_warmup(start_origin: bool = True) -> dict:
 
 
 @mcp.tool()
-def origin_pages_gc(threshold: int = 200, dry_run: bool = True) -> dict:
+def origin_pages_gc(threshold: int = 200, dry_run: bool = True,
+                    baseline: list = None) -> dict:
     """页堆积治理：项目页超阈值时报告（dry_run=true）或清理（false）。
 
+    传 baseline（页面短名列表快照）时只清理快照之后新增的页面，绝不 closeAll，
+    也不会关闭用户原有页面 —— 适合测试/冒烟收尾或"跑测试污染了工程"的人工补救。
     实测：793 页时 list_pages 30.9s、单次 close 59.2s（险撞 90s 看门狗）。
     """
-    return engine.pages_gc(threshold=threshold, dry_run=dry_run)
+    return engine.pages_gc(threshold=threshold, dry_run=dry_run,
+                           baseline=baseline)
 
 
 @mcp.tool()
@@ -980,12 +984,17 @@ def origin_verify_graph(graph: str = "", expected_x_title: str = "",
 
 
 @mcp.tool()
-def origin_save_project(path: str) -> dict:
+def origin_save_project(path: str, pages: list = None,
+                        exclude: list = None) -> dict:
     """保存当前 Origin 项目为可编辑 OPJU（正式交付物，可在 Origin 中继续编辑）。
 
-    保存的是当前项目全部页面（工作簿+图页）；省略扩展名自动补 .opju。
+    注意：当前版本**只支持全量保存**（Origin 没有稳定的选择性另存 COM 通道）。
+    返回体显式给出 pages / pages_count，便于上层核对"到底保存了哪些页"；
+    传 pages / exclude 会被忽略并在返回体里给出 ignored_selection + warning
+    （issue 实测：用户工程混入测试页后，一次保存让 21 KB 变 400 KB）。
+    省略扩展名自动补 .opju。
     """
-    return engine.save_project(path)
+    return engine.save_project(path, pages=pages, exclude=exclude)
 
 
 @mcp.tool()

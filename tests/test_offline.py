@@ -137,3 +137,47 @@ def test_main_still_dispatches_flags(monkeypatch, capsys):
     monkeypatch.setattr(oms, "_selftest", lambda: called.append("selftest"))
     oms.main(["--selftest"])
     assert called == ["selftest"]
+
+
+# ---------------------------------------------------------------------------
+# 测试/冒烟防污染守卫（issue：attach 模式跑 pytest 会把页面写进用户工程）
+# ---------------------------------------------------------------------------
+def test_test_attach_guard_blocks_attach(monkeypatch):
+    import origin_engine as eng
+
+    monkeypatch.delenv("DSH_ORIGIN_ALLOW_ATTACH_TESTS", raising=False)
+    monkeypatch.setenv("ORIGIN_SESSION", "attach")
+    r = eng._test_attach_guard()
+    assert r is not None and r.get("error_code") == "test_attach_blocked"
+    assert r.get("recoverable") is False
+
+
+def test_test_attach_guard_allows_isolated_and_pins_no_autokill(monkeypatch):
+    import origin_engine as eng
+
+    monkeypatch.delenv("DSH_ORIGIN_ALLOW_ATTACH_TESTS", raising=False)
+    monkeypatch.delenv("DSH_ORIGIN_AUTOKILL", raising=False)
+    monkeypatch.setenv("ORIGIN_SESSION", "isolated")
+    assert eng._test_attach_guard() is None
+    # 测试进程绝不允许 autokill 用户 Origin
+    assert os.environ["DSH_ORIGIN_AUTOKILL"] == "0"
+
+
+def test_test_attach_guard_explicit_allow(monkeypatch):
+    import origin_engine as eng
+
+    monkeypatch.setenv("DSH_ORIGIN_ALLOW_ATTACH_TESTS", "1")
+    monkeypatch.setenv("ORIGIN_SESSION", "attach")
+    assert eng._test_attach_guard() is None
+
+
+def test_connect_refuses_attach_under_tests(monkeypatch):
+    """真实入口验证：测试进程在 attach 下连接会被拒，且不碰 Origin。"""
+    import origin_engine as eng
+
+    monkeypatch.setattr(eng, "_connected", False, raising=False)
+    monkeypatch.setattr(eng, "_origin_app", None, raising=False)
+    monkeypatch.delenv("DSH_ORIGIN_ALLOW_ATTACH_TESTS", raising=False)
+    monkeypatch.setenv("ORIGIN_SESSION", "attach")
+    ok, r = eng._connect_impl()
+    assert not ok and r.get("error_code") == "test_attach_blocked"

@@ -585,6 +585,11 @@ dsh-origin-plugin/
 :: 用 DSH 自带 Node MCP SDK 握手（与 dsh-mcp-client 同款，机器无关自动探测）
 node smoke\mcp_handshake_test.mjs
 
+:: ⚠️ v2.8.0 起：smoke/tests 在 attach 模式下会被引擎拒绝（test_attach_blocked）。
+::    先关闭 Origin，再设 ORIGIN_SESSION=isolated 跑（隔离实例由脚本自己启动/退出清理）。
+::    详见 smoke\README.md；导出默认落 %TEMP%\dsh-origin-tests\output。
+set ORIGIN_SESSION=isolated
+
 :: COM 链路冒烟 / 进阶能力 / 科学分析
 .venv\Scripts\python.exe -X utf8 smoke\origin_com_smoke_test.py
 .venv\Scripts\python.exe -X utf8 smoke\advanced_test.py
@@ -602,7 +607,7 @@ node smoke\mcp_handshake_test.mjs
 
 ## 端到端验证清单
 
-- [ ] smoke 测试输出 `RESULT: OK`，`output\comtest.png` 存在
+- [ ] smoke 测试输出 `RESULT: OK`，`%TEMP%\dsh-origin-tests\output\comtest.png` 存在（v2.8.0 起测试默认写临时目录）
 - [ ] `--selftest` 输出 `SELFTEST OK`（含样式应用/幂等命名/预览/错误码/统计批）
 - [ ] `--concurrency-test` 输出 `CONCURRENCY-TEST OK`（8/8）
 - [ ] `--offline-test` 输出 `OFFLINE-TEST OK`（50 工具注册 + 计划流 + 文件 IO）
