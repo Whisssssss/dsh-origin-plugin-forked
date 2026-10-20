@@ -488,6 +488,8 @@ def origin_export_pptx(graph: str, file_path: str, width: int = 2400,
                        notes: str = "") -> dict:
     """图导出高分辨率 PNG 并组装 PowerPoint 页（论文组图交付）。
 
+    交付策略：默认不导出 PPT；**仅在用户明确要 PPT 时**使用。
+
     Args:
         graph: 图页短名。
         file_path: 输出 .pptx 绝对路径（同目录同时保留 PNG）。
@@ -530,6 +532,9 @@ def origin_figure(columns: dict = None, data_source: str = "",
                   peak_top_n: int = 5) -> dict:
     """端到端一张图：一次调用完成 导入/写数 → 画图 →（可选）验证 → 导出 →（可选）交付。
 
+    交付策略：本工具**总会导出文件**；默认交付只存 OPJU，请用 origin_plot + origin_save_project。
+    仅用户明确要图片/交付目录时才使用本工具。
+
     这是**提速主路径**——把常用流程从 6-10 次工具调用收敛为 1 次（性能分析：
     感知耗时的 80% 在模型决策轮次，不在 Origin 执行）。
 
@@ -561,12 +566,16 @@ def origin_warmup(start_origin: bool = True) -> dict:
 
 
 @mcp.tool()
-def origin_pages_gc(threshold: int = 200, dry_run: bool = True) -> dict:
+def origin_pages_gc(threshold: int = 200, dry_run: bool = True,
+                    baseline: list = None) -> dict:
     """页堆积治理：项目页超阈值时报告（dry_run=true）或清理（false）。
 
+    传 baseline（页面短名列表快照）时只清理快照之后新增的页面，绝不 closeAll，
+    也不会关闭用户原有页面 —— 适合测试/冒烟收尾或"跑测试污染了工程"的人工补救。
     实测：793 页时 list_pages 30.9s、单次 close 59.2s（险撞 90s 看门狗）。
     """
-    return engine.pages_gc(threshold=threshold, dry_run=dry_run)
+    return engine.pages_gc(threshold=threshold, dry_run=dry_run,
+                           baseline=baseline)
 
 
 @mcp.tool()
@@ -788,7 +797,10 @@ def origin_plot_file(columns: dict, plot_type: str = "line", fmt: str = "png",
                      x_column: str = "", y_columns: list = None, title: str = "",
                      graph_name: str = "", style_mode: str = "default",
                      family: str = "", style_overrides: dict = None) -> dict:
-    """一键完成：写数据 -> 画图 -> 导出文件（最常用）。
+    """一键完成：写数据 -> 画图 -> 导出文件（最常用，但**会落盘**）。
+
+    交付策略：默认最终只保存 OPJU；请优先 origin_plot + origin_save_project。
+    仅在用户明确要图片时才用本工具。
 
     Args:
         columns: 数据 {"列名": [数值列表], ...} 或二维列表；第一列自动为 X。
@@ -844,6 +856,8 @@ def origin_plot_template(template_id: str, data: dict, graph_name: str = "",
 def origin_export(graph: str, fmt: str = "png", file_path: str = "",
                   width: int = 1200) -> dict:
     """把图导出为 PNG/SVG/PDF/TIF/EMF 文件。
+
+    交付策略：默认最终只保存 OPJU（origin_save_project）；**仅在用户明确要图片时**才导出。
 
     Args:
         graph: origin_plot 返回的图引用（或 origin_list_graphs 的短名）。
@@ -980,12 +994,17 @@ def origin_verify_graph(graph: str = "", expected_x_title: str = "",
 
 
 @mcp.tool()
-def origin_save_project(path: str) -> dict:
+def origin_save_project(path: str, pages: list = None,
+                        exclude: list = None) -> dict:
     """保存当前 Origin 项目为可编辑 OPJU（正式交付物，可在 Origin 中继续编辑）。
 
-    保存的是当前项目全部页面（工作簿+图页）；省略扩展名自动补 .opju。
+    注意：当前版本**只支持全量保存**（Origin 没有稳定的选择性另存 COM 通道）。
+    返回体显式给出 pages / pages_count，便于上层核对"到底保存了哪些页"；
+    传 pages / exclude 会被忽略并在返回体里给出 ignored_selection + warning
+    （issue 实测：用户工程混入测试页后，一次保存让 21 KB 变 400 KB）。
+    省略扩展名自动补 .opju。
     """
-    return engine.save_project(path)
+    return engine.save_project(path, pages=pages, exclude=exclude)
 
 
 @mcp.tool()
@@ -995,6 +1014,8 @@ def origin_export_delivery(graph: str, source_path: str = "",
                            report_text: str = "",
                            export_data_csv: bool = True) -> dict:
     """一键交付：建规整目录收纳图片 + 可编辑 OPJU 并逐文件核验。
+
+    交付策略：默认最终只保存 OPJU；**仅用户明确要完整交付目录/图片时**才用本工具。
 
     传 source_path 时在源数据文件同级新建 <数据名>_Origin_<时间戳>/ 目录
     （不覆盖原始数据）；否则用 output_dir 或默认输出目录。原始数据只读。
@@ -1987,8 +2008,15 @@ def _sync_stdio_server():
             }})
 
 
-if __name__ == "__main__":
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+def main(argv=None):
+    """进程入口（独立出来便于离线单测）。
+
+    DSH 停机/重启时，控制台的 Ctrl+C 会广播给同一控制台组里的子进程；
+    此前它会从 stdio 读循环里冒出来，打印一整段 KeyboardInterrupt traceback
+    （看起来像服务器崩了，实际只是正常关闭）。这里统一静默退出。
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    arg = args[0] if args else ""
     if arg == "--offline-test":
         _offline_test()
     elif arg == "--selftest":
@@ -2000,4 +2028,12 @@ if __name__ == "__main__":
     elif arg == "--json-echo":  # 供外部快速探测
         print(json.dumps({"server": "origin", "ok": True, "version": "2.2.2"}))
     else:
-        _sync_stdio_server()
+        try:
+            _sync_stdio_server()
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

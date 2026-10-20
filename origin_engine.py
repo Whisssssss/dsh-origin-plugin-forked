@@ -22,11 +22,13 @@ DSH Origin 画图插件 —— 核心引擎
 5. 出错永不崩溃：所有公开函数返回结构化 dict，异常被转换为
    {"ok": false, "error": ...}，并保证队列/锁状态一致。
 """
+import atexit
 import json
 import os
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -39,7 +41,27 @@ import plot_style as pst
 # ---------------------------------------------------------------------------
 # 常量与全局
 # ---------------------------------------------------------------------------
-DEFAULT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "dsch_origin_plugin", "output")
+def _looks_like_test_process():
+    """粗略判断当前进程是不是仓库测试/冒烟脚本（pytest 或 smoke//tests/ 下的 __main__）。"""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    if "pytest" in sys.modules:
+        return True
+    try:
+        main_file = (getattr(sys.modules.get("__main__"), "__file__", "") or "")
+        norm = main_file.replace("\\", "/").lower()
+        return "/smoke/" in norm or "/tests/" in norm
+    except Exception:
+        return False
+
+
+# 默认输出目录：显式 env 优先；测试/冒烟默认落到系统临时目录，不污染用户交付目录
+# （issue 实测：smoke/pytest 导出的 Contour*.png 混进了 ~/dsch_origin_plugin/output）。
+DEFAULT_OUTPUT_DIR = (
+    os.environ.get("DSH_ORIGIN_OUTPUT_DIR")
+    or (os.path.join(tempfile.gettempdir(), "dsh-origin-tests", "output")
+        if _looks_like_test_process()
+        else os.path.join(os.path.expanduser("~"), "dsch_origin_plugin", "output")))
 
 _com_queue = queue.Queue()        # 任务队列：所有 Origin 操作在此串行执行
 _com_thread = None                # 专用 COM 线程
@@ -593,6 +615,83 @@ def _origin_proc_count():
         return None
 
 
+def _origin_proc_pids():
+    """返回当前 Origin64.exe 的 PID 集合（测试隔离清理用）。"""
+    pids = set()
+    try:
+        out = os.popen('tasklist /FI "IMAGENAME eq Origin64.exe" /NH /FO CSV 2>nul').read()
+        for line in out.splitlines():
+            parts = [p.strip('"') for p in line.split('","')]
+            if parts and parts[0].strip('"').lower() == "origin64.exe" and len(parts) > 1:
+                try:
+                    pids.add(int(parts[1]))
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return pids
+
+
+_TEST_STARTED_ORIGIN_PIDS = set()
+_TEST_CLEANUP_ARMS = False
+
+
+def _running_under_tests():
+    """判断当前进程是不是仓库测试/冒烟脚本（与 _looks_like_test_process 同一策略）。"""
+    return _looks_like_test_process()
+
+
+def _test_attach_guard():
+    """测试/冒烟默认禁止 attach 到用户正在使用的 Origin（防污染，issue 实测 12 页垃圾）。
+
+    策略（按优先级）：
+      1. DSH_ORIGIN_ALLOW_ATTACH_TESTS=1 显式承担风险 → 放行（仍建议配合 baseline 回滚）；
+      2. 非测试进程 → 放行（正常 MCP 任务不受影响）；
+      3. 测试进程 + ORIGIN_SESSION=isolated → 放行，并强制 DSH_ORIGIN_AUTOKILL=0，
+         绝不为了让测试跑起来去 taskkill 用户手动打开的 Origin；
+      4. 测试进程 + attach（默认）→ 返回结构化拒绝，一个页面都不会写进用户工程。
+    返回 None 表示放行，返回 dict 表示结构化拒绝。
+    """
+    if os.environ.get("DSH_ORIGIN_ALLOW_ATTACH_TESTS", "").strip().lower() in \
+            ("1", "true", "on", "yes"):
+        return None
+    if not _running_under_tests():
+        return None
+    if os.environ.get("ORIGIN_SESSION", "attach").strip().lower() == "isolated":
+        if not (os.environ.get("DSH_ORIGIN_AUTOKILL") or "").strip():
+            os.environ["DSH_ORIGIN_AUTOKILL"] = "0"
+        return None
+    return oerr.fail(
+        "test_attach_blocked",
+        "检测到测试/冒烟脚本正在 attach 模式下运行，已拒绝连接：为避免把测试页面"
+        "写进你正在使用的 Origin 工程，测试必须使用隔离会话。",
+        session_mode="attach",
+        next_actions=[
+            "先关闭 Origin（或确认它没有未保存工程），再设 ORIGIN_SESSION=isolated 重跑测试",
+            "或显式设置 DSH_ORIGIN_ALLOW_ATTACH_TESTS=1（风险自负：会写进当前工程）",
+            "正常 MCP 作图任务不受此限制（只有 tests/ 与 smoke/ 脚本会触发）",
+        ])
+
+
+def _arm_test_origin_cleanup():
+    """测试/冒烟进程退出时，只关闭它自己启动的 Origin 实例（绝不动用户原有实例）。"""
+    global _TEST_CLEANUP_ARMS
+    if _TEST_CLEANUP_ARMS:
+        return
+    _TEST_CLEANUP_ARMS = True
+    started = set(_TEST_STARTED_ORIGIN_PIDS)
+
+    def _cleanup():
+        alive = _origin_proc_pids() & started
+        for pid in sorted(alive):
+            try:
+                os.popen(f"taskkill /F /PID {pid} >nul 2>&1").read()
+            except Exception:
+                pass
+
+    atexit.register(_cleanup)
+
+
 def _autokill_enabled():
     """连接前自动清理残留 Origin 进程的开关（DSH_ORIGIN_AUTOKILL）。
 
@@ -641,6 +740,11 @@ def _connect_impl():
     global _connected, _origin_app
     if _connected and _origin_app is not None:
         return True, _describe_impl()
+    # 测试/冒烟防污染守卫：必须在 autokill 之前，测试进程永远不会 taskkill 用户 Origin。
+    guard = _test_attach_guard()
+    if guard is not None:
+        return False, guard
+    test_before_pids = _origin_proc_pids() if _running_under_tests() else None
     # 连接前自愈（#1）：清理残留 Origin64 进程 -> 等 2 秒 -> 再让 COM 启动/复用
     autokill = _kill_residual_origin() if _autokill_enabled() else None
     blocked = _isolated_session_blocked()
@@ -666,6 +770,10 @@ def _connect_impl():
         elapsed = time.time() - started
         _origin_app = op
         _connected = True
+        if test_before_pids is not None:
+            # 只记录"本次测试启动的" Origin PID，进程退出时只清理这些（绝不动用户实例）。
+            _TEST_STARTED_ORIGIN_PIDS.update(_origin_proc_pids() - test_before_pids)
+            _arm_test_origin_cleanup()
         nproc = _origin_proc_count()
         info = {
             "ok": True,
@@ -2942,11 +3050,19 @@ def _help_impl():
     """快速使用速查（不连接 Origin，秒回）。模型画图前调用一次即可上手。"""
     return {
         "ok": True,
+        "delivery_policy": {
+            "mode": "opju_only",
+            "rule": "最终交付只保存可编辑 OPJU（origin_save_project）。"
+                    "不要主动导出图片/PPT/交付目录——图片由用户自行导出。",
+            "unless": "用户明确要求图片/PPT/完整交付目录时，才用 "
+                      "origin_export / origin_export_pptx / origin_export_delivery。",
+            "self_check": "自检用 origin_view_graph（内联渲染，不落盘）或 "
+                          "origin_verify_graph（读回，不落盘）。",
+        },
         "usage": (
-            "最快路径：origin_plot_file(columns={'x':[...], 'y':[...]}, "
-            "plot_type='line'|'scatter'|'line_symbol'|'column', fmt='png'|'svg', "
-            "file_path='可选绝对路径', width=1200, title='可选') -> "
-            "返回 {'ok': true, 'file': '绝对路径'}。"
+            "推荐路径：origin_write_data / origin_load_file -> origin_plot（只建图，不导出）"
+            " -> origin_view_graph 自检 -> origin_save_project 保存 OPJU。"
+            "仅在用户明确要图片时才调用 origin_export / origin_plot_file / origin_figure 的导出。"
         ),
         "data_format": {
             "columns": "dict {列名: [数值列表]}，第一列自动设为 X，其余为 Y；也可传二维列表 [[..],[..]] 或一维列表",
@@ -2958,14 +3074,14 @@ def _help_impl():
             "origin_write_data": "写多列数据 -> 返回 worksheet",
             "origin_load_file": "导入本地表格文件（CSV/TXT/XLSX/XLS，中文路径/编码安全）-> 返回 worksheet+列画像",
             "origin_plot": "画图（含 histogram/box/bar + yerr_column 误差棒 + style_overrides 显式样式）-> 返回 graph",
-            "origin_export": "导出 PNG/SVG/PDF/TIF/EMF -> 返回 file 绝对路径",
-            "origin_plot_file": "一键 写数+画图+导出 -> 返回 file（最常用）",
+            "origin_export": "导出 PNG/SVG/PDF/TIF/EMF（仅在用户明确要图片时用）",
+            "origin_plot_file": "一键 写数+画图+导出（仅在用户明确要图片时用；默认交付请走 origin_plot + origin_save_project）",
             "origin_plot_plan": "绘图计划（离线秒回）：逐列画像+角色建议+元素清单+待确认问题 -> plan_id",
             "origin_execute_plan": "按 plan_id 执行计划（写数+画图+导出），不确定列应先经用户确认",
             "origin_plot_template": "领域模板：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel",
             "origin_verify_graph": "确定性反读核验（轴标题/字号/图层几何/图例/文件完整性），与 view_graph 互补",
-            "origin_save_project": "保存当前项目为可编辑 OPJU",
-            "origin_export_delivery": "一键交付：源文件同级建 <数据名>_Origin_<时间戳>/ 收纳图片+OPJU 并核验",
+            "origin_save_project": "保存当前项目为可编辑 OPJU（默认最终交付物）",
+            "origin_export_delivery": "一键交付目录（图片+OPJU；仅在用户明确要图片时用）",
             "origin_filter_data": "删点/裁剪（drop_rows 索引 或 x_min/x_max）",
             "origin_fit": "拟合 kind=linear 或 Origin 函数名(ExpDec1/Gauss/Polynomial/...)，拟合曲线上图",
             "origin_plot3d": "3D surface(需 {'z': 2D网格}) / scatter(需 {'x','y','z'})",
@@ -3834,7 +3950,14 @@ def _load_file_impl(path, worksheet=None, sheet=None, max_preview_rows=5):
 # ---------------------------------------------------------------------------
 # OPJU 项目保存 + 交付目录（P0）：可编辑工程是一等交付物
 # ---------------------------------------------------------------------------
-def _save_project_impl(path):
+def _save_project_impl(path, pages=None, exclude=None):
+    """保存当前项目。
+
+    注意：Origin 没有稳定的"另存指定页面"COM 通道，本实现**始终全量保存**。
+    因此返回体显式给出 pages / pages_count，并在传入 pages/exclude 时回报
+    ignored_selection + warning，避免上层误以为做了选择性保存（issue 实测：
+    用户工程混入测试页后 21 KB → 400 KB）。
+    """
     try:
         ok, conn = _connect_impl()
         if not ok:
@@ -3885,9 +4008,21 @@ def _save_project_impl(path):
             return oerr.fail("export_error",
                              "OPJU 保存失败（op.save / 临时搬运 / LabTalk save 均未落盘）",
                              path=path)
-        return oerr.ok(file=path, size=os.path.getsize(path),
-                       detail=(f"项目已保存 -> {path}"
-                               "（保存的是当前项目全部页面，可在 Origin 中继续编辑）"))
+        lp = _list_pages_impl()
+        page_names = ([p.get("name") for p in (lp.get("pages") or []) if p.get("name")]
+                      if lp.get("ok") else [])
+        info = oerr.ok(file=path, size=os.path.getsize(path),
+                       pages=page_names, pages_count=len(page_names),
+                       selection_supported=False,
+                       detail=(f"项目已保存 -> {path}（全量：当前项目全部 "
+                               f"{len(page_names)} 页，可在 Origin 中继续编辑）"))
+        if pages or exclude:
+            info["ignored_selection"] = {"pages": pages, "exclude": exclude}
+            info["warning"] = ("origin_save_project 当前只支持全量保存：已忽略 "
+                               f"pages/exclude，实际保存全部 {len(page_names)} 页")
+            info.setdefault("next_actions", []).append(
+                "先用 origin_manage_pages(action='close', pages=[...]) 关掉不需要的页，再保存")
+        return info
     except Exception as e:
         return oerr.from_exception(e, trace=traceback.format_exc(limit=3))
 
@@ -5306,13 +5441,14 @@ def warmup(start_origin=True):
 
 
 @_synchronized
-def pages_gc(threshold=200, dry_run=True):
-    """页堆积治理：项目页超阈值时报告/清理（实测 793 页让枚举慢 30 倍）。"""
+def pages_gc(threshold=200, dry_run=True, baseline=None):
+    """页堆积治理：超阈值时报告/清理；传 baseline 时只清理快照之后的新增页。"""
     ok, conn = _connect_impl()
     if not ok:
         return conn
     import origin_e2e as _e2e
-    return _e2e.pages_gc_impl(_origin_app, threshold=threshold, dry_run=dry_run)
+    return _e2e.pages_gc_impl(_origin_app, threshold=threshold, dry_run=dry_run,
+                              baseline=baseline)
 
 
 @_synchronized
@@ -5598,8 +5734,8 @@ def load_file(path, worksheet=None, sheet=None, max_preview_rows=5):
 
 
 @_synchronized
-def save_project(path):
-    return _save_project_impl(path)
+def save_project(path, pages=None, exclude=None):
+    return _save_project_impl(path, pages=pages, exclude=exclude)
 
 
 @_synchronized

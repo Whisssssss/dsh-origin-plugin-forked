@@ -1,4 +1,4 @@
-# COMPATIBILITY — 兼容性矩阵与已知失败场景（v2.3.0）
+# COMPATIBILITY — 兼容性矩阵与已知失败场景（v2.8.0）
 
 > 本文件从 README 拆出（#21），集中维护"在什么环境能用/什么场景实测会失败/失败时怎么办"。
 > 所有"实测"条目均来自真机探针（Windows 11 + Origin 2026/2026b），非文档推断。
@@ -59,6 +59,8 @@
 | 13 | 3D 图色标（colorbar） | 未实现 | GL 层色标对象通道同上 | 同上；文档提示手动添加 |
 | 14 | 矩阵 heatmap（plotm） | LabTalk `plotm` 全变体（`im:=`/`ogl:=`/`mat:=`、先 `win -a` 激活）均静默失败（err=False、0 plots） | plotm 通道在本机 Origin 2026 + 外部 Python COM 下不可用（2026-09-16 探针实证） | `origin_matrix_plot` 明确拒绝 heatmap；用 `contour_fill` 近似或 Origin 内手动绘制 |
 | 15 | MBook/MSheet 的 `lname` 属性 | 返回空字符串 | originpro MBook/MSheet 未实现 lname | 引擎矩阵引用统一走 `obj.GetName()`；AI 不应直接依赖矩阵对象的 lname |
+| 16 | DSH 0.2.x 下 `mcp-origin` 整行被禁用 | 启动报 `... is incompatible with dsh ...`；GUI 显示「已关闭」；对话里没有任何 `mcp__origin__*` 工具 | profile 里的 `dsh-mcp-client` 与运行时错代（如 rc.8 的 peer `^0.1.0-rc.8` 不含 0.2.x） | 在 profile 里装与 `dsh --version` 同号的 `dsh-mcp-client` 并重启；详见 §7 |
+| 17 | 工具静默不注册，DSH 启动完全正常 | 无任何报错、无 `mcp__origin__*` 工具，`origin_diagnose` 也调不到 | 系统 Python 缺 `mcp`/`originpro`/`pywin32`，MCP server 启动即退出；`failOnStartupError: false` 把失败掩盖成"静默" | 用插件 venv 装 `requirements.txt`，并在 profile 用 config-only 覆盖 `command` 指向 venv python；详见 §7.4 |
 
 ## 5. 与其他 Origin 方案的差异
 
@@ -79,3 +81,100 @@
 | `ORIGIN_MCP_PROFILE` | full | `compact`=隐藏统计批 |
 | `ORIGIN_IPC_LOCK` | 关 | `1`=跨进程命名互斥体 |
 | `DSH_ORIGIN_PYTHON` | — | npx/启动器指定 Python 解释器路径 |
+
+## 7. DSH 运行时兼容（0.2.x）
+
+> 2026-10 实测组合：DSH `0.2.1-alpha.5` + profile 里误装的 `@deepseek-ai/dsh-mcp-client@0.1.0-rc.8`。
+
+### 7.1 症状
+
+DSH 启动时终端刷出（可能被后续日志淹没）：
+
+```
+dsh: disabling profile plugin row "mcp-origin": Plugin @deepseek-ai/dsh-mcp-client@0.1.0-rc.8
+is incompatible with dsh 0.2.1-alpha.5: requirements {"@deepseek-ai/dsh-attachment":"^0.1.0-rc.8", ...}
+```
+
+插件管理界面里 `@deepseek-ai/dsh-mcp-client` 显示「已关闭」，对话中没有任何
+`mcp__origin__*` 工具。
+
+### 7.2 根因
+
+- `dsh-mcp-client@0.1.0-rc.8` 的 `peerDependencies` 全部是 `^0.1.0-rc.8`
+  （等价于 `>=0.1.0-rc.8 <0.2.0`），与 **0.2.x 运行时**不满足；DSH 的插件兼容门禁
+  会**整行禁用**该 loader。这是版本错代，不是插件缺陷。
+- 该 profile 里的 rc.8 还可能是**残缺安装**（只有 `package.json`/README，没有 `lib/`），
+  即使版本对上也无法 import。
+- 另一条**独立**故障：系统 Python 缺 `mcp`/`originpro`/`pywin32` 时，MCP server
+  启动即退出；`failOnStartupError: false` 会让 DSH 照常启动、工具静默失踪 —— 两条
+  故障的表现都是"没有工具"，但修复手段不同（见 §7.3 / §7.4）。
+
+### 7.3 修复：让 mcp-client 与运行时同号
+
+```sh
+# 1) 看当前运行时版本
+dsh --version                       # 例：0.2.1-alpha.5
+
+# 2) 在 profile 里装同版本 mcp-client（例：0.2.1-alpha.5）
+dsh plugin --profile web add @deepseek-ai/dsh-mcp-client@0.2.1-alpha.5
+
+# 3) 确认包完整（必须有 lib/index.js）且版本正确
+node -p "require('C:/Users/<你>/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-mcp-client/package.json').version"
+
+# 4) 重启 DSH（兼容门禁只在启动时评估；热重载不会补挂从未加载过的行）
+```
+
+版本对照：**DSH 0.1.x ↔ dsh-mcp-client 0.1.x；DSH 0.2.x ↔ dsh-mcp-client 0.2.x（同号）**。
+
+> 应急手段 `dsh plugin allow-version` 只做"精确版本豁免"，不解决 API 差异；
+> 只在临时验证时使用，长期应安装匹配版本。
+
+### 7.4 修复：Python 依赖（第二条静默故障）
+
+```bat
+python -m venv "%USERPROFILE%\dsh_origin_plugin\.venv"
+"%USERPROFILE%\dsh_origin_plugin\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+```
+
+然后在 profile 的 `cordis.patch.yml` 用 **config-only** 覆盖 `mcp-origin` 的
+`command`，指向 venv 的 python（完整字段见 README §2.1；覆盖会整体替换 config）。
+
+验证顺序：
+
+1. `origin_diagnose` 返回 `engine_connected: true`（首次会自动拉起 Origin，5~45 秒）；
+2. 对话工具列表出现 `mcp__origin__*`；
+3. 输入 `/origin`（v2.8.0+）应出现命令补全，并回一句"已进入 Origin 作图模式"。
+
+## 8. 测试与 smoke 不得污染用户 Origin 工程（v2.8.0）
+
+> 实测事故：在用户已打开工程的机器上跑 `pytest tests/`，attach 模式直接连到同一个
+> Origin 实例，把 `Contour*`/`Graph*`/`M*` 等测试页写进用户工程；随后
+> `origin_save_project` 全量保存，工程从 21 KB 膨胀到 400 KB。
+
+### 硬规则
+
+1. **测试/冒烟不得在 attach 实例上建页**。v2.8.0 起 `origin_engine._connect_impl`
+   会识别 pytest / `smoke/`、`tests/` 脚本：attach 模式下**直接拒绝连接**
+   （错误码 `test_attach_blocked`，零副作用）；只有显式
+   `DSH_ORIGIN_ALLOW_ATTACH_TESTS=1` 才放行。
+2. 测试进程**永远不会** `taskkill` 用户 Origin：`tests/conftest.py` 固定
+   `DSH_ORIGIN_AUTOKILL=0`；isolation 模式下引擎也会强制关掉 autokill。
+3. 真机用例默认跳过，需显式准入（见 `tests/test_live.py` 文件头）：
+   ```bat
+   set ORIGIN_SESSION=isolated
+   set DSH_ORIGIN_LIVE_TESTS=1
+   python -m pytest tests/test_live.py -v
+   ```
+   收尾按 baseline 差集只关闭本次新增页，并断言页面集合回到 baseline。
+4. 测试导出目录用 `DSH_ORIGIN_OUTPUT_DIR` 指到临时目录；测试/冒烟进程默认落到
+   `%TEMP%\dsh-origin-tests\output`，不会写进 `~/dsch_origin_plugin/output`。
+5. 人工补救（怀疑工程已被测试污染时）：先用
+   `origin_pages_gc(dry_run=true, baseline=[...])` 看差集，再
+   `dry_run=false` 只删新增页。**绝不要 closeAll**，也不要把用户自己的同名页
+   （如 `Contour*`）当垃圾删掉。
+
+### 为什么不能用 closeAll 清理
+
+`origin_pages_gc(dry_run=false)` 不带 baseline 时仍是 closeAll（历史行为，适合空工程）；
+带 baseline 时才只删"快照之后新增"的页面。判断哪些页是测试建出来的只能靠 baseline
+快照，不能靠名字模式匹配。

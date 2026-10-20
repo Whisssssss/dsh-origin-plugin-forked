@@ -58,7 +58,8 @@
 - 🎛 **细粒度改图**：`origin_edit_plot/axis/legend/page` —— 只换一条线的颜色、加粗、隐藏、挪图例、改轴范围、调纸张尺寸；`origin_manage_pages` 关窗/改名；`origin_inspect_graph` 先看清现状
 - 📂 **文件导入**：`origin_load_file` 直接读 CSV/TXT/XLSX/XLS（中文路径/编码安全）
 - 🧩 **领域模板**：多谱线堆叠偏移 / XRD 三件套 / 双Y轴 / 森林图 / 多面板（`origin_plot_template`）
-- 📦 **可信交付**：`origin_export_delivery` 一键交付目录（图片+数据csv+**可编辑 OPJU**）；`origin_save_project` 单独存工程；`DSH_ORIGIN_NO_AUTO_SAVE=1` 可禁自动写 .opju（提示 Ctrl+S）
+- 📦 **默认只交付 OPJU**：最终产物是可编辑工程 `origin_save_project`，**图片/PPT 由用户自行导出**；
+  仅在明确要求时才用 `origin_export_delivery`（图片+数据csv+OPJU）或 `origin_export`；`DSH_ORIGIN_NO_AUTO_SAVE=1` 可禁自动写 .opju（提示 Ctrl+S）
 - ✨ **期刊级排版**：`style_mode`(journal/presentation) + `family` 调色板（带使用约束）+ 幂等 `graph_name` + 语义轴标题 + `style_overrides` 显式样式逐项回报
 - 👁 **双保险校验**：`origin_view_graph` 内联图片（模型看、也能带给用户）+ `origin_verify_graph` 确定性反读（程序核）
 - 🧮 **统计批**：t 检验 / ANOVA / PCA / Kaplan-Meier 生存分析（纯 numpy 自研，结果带 `confidence_note`：仅供探索，正式发表用 SPSS/R/Origin 复核）
@@ -166,7 +167,13 @@ dsh plugin add dsh-origin-plugin
 **v2.0.3 起自动携带运行时依赖 `@deepseek-ai/dsh-mcp-client`**：市场安装
 （`dsh plugin add`）会把它作为传递依赖装进 profile 的 node_modules——缺少它时 loader
 无法按 `name` 解析该条目，工具会**静默永不注册**（DSH 照常启动、无任何报错）。
-**v2.0.2 起 bundle 默认已自定位**：server 绝对路径由 `!!js` 在启动时按
+
+> ⚠️ **版本必须与 DSH 同号**：`dsh-mcp-client` 的 peer 范围绑定 DSH 大版本
+> （0.1.x ↔ 0.1.x，0.2.x ↔ 0.2.x）。错代时 DSH 会在启动阶段**整行禁用** `mcp-origin`
+> （报 `... is incompatible with dsh ...`），表现和"没装"完全一样。修复步骤见
+> [COMPATIBILITY.md](COMPATIBILITY.md) §7。
+
+**v2.0.2 起 bundle 已自定位**：server 绝对路径由 `!!js` 在启动时按
 `<DSH_HOME>/profiles/web/node_modules/dsh-origin-plugin/` 计算（DSH_HOME 缺省回退
 `%USERPROFILE%/.dsh`），不再受进程工作目录影响；默认用系统 `python` 启动
 `origin_mcp_server.py`。
@@ -233,13 +240,43 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 > 一等公民——`dsh-mcp-client` 会自动把外部 MCP 工具桥接为原生工具
 > （名称 `mcp__<serverName>__<rawName>`），无需编写 TypeScript 插件即可接入 Python 能力。
 
+### 3.1 斜杠指令 `/origin`（DSH，v2.8.0+）
+
+在 DSH 对话里直接表明"要用 Origin 作图"，不用再手写长提示词：
+
+```text
+/origin 用这批 UV-Vis 数据画吸收谱，标注 280 nm 处的峰
+/origin
+```
+
+它做两件事：把「用 Origin 绘图」的意图 + 工作流纪律（先 `origin_help`、数据含义有歧义先问、
+快路径 `origin_figure`、交付前 `origin_verify_graph`/`origin_view_graph`、不虚构数据）
+交给模型；然后起一轮对话。命令是**全局**的，任何 agent 都能用；空参数时只进入作图模式，
+助手会先反问你画什么。
+
+**数据可以直接作为附件带上**（CSV / TXT / TSV / XLSX / DAT 等）：
+
+```text
+（先在输入框点附件，选 data.csv，再输入：）
+/origin 把这批数据画成折线图，X 用 wavelength 列
+```
+
+附件会以**只读副本**随命令消息发给模型（DSH 会把文件块投影成"只读路径"文本），
+模型用 `origin_load_file` 导入后再作图，不会凭文件名臆测内容。图片附件只作参考：
+如果图里是数据表格，助手会要求你提供 CSV/XLSX 源文件，而不是凭图估算数值。
+
+- 命令列表里搜 `origin` 即可看到（描述：用 Origin MCP 插件完成本次作图/分析请求）。
+- 旧版 DSH（没有 `commands` 服务）上该命令自动不出现，不影响插件加载。
+- 若命令不出现或工具缺失，先看 [COMPATIBILITY.md](COMPATIBILITY.md) §7：DSH 0.2.x
+  必须搭配同号的 `@deepseek-ai/dsh-mcp-client`，否则 `mcp-origin` 整行会被运行时禁用。
+
 ### 4. 对话触发示例
 
 | 你说 | 模型会调用 |
 |---|---|
-| 「用 Origin 画 y=x²（x=1..10）的折线图，导出 PNG」 | `mcp__origin__origin_plot_file` |
-| 「把这两列数据画成散点图导出 SVG：x=[1,2,3,4,5], y=[3.1,4.9,7.2,8.8,11.3]」 | `mcp__origin__origin_plot_file` |
-| 「先写数据再分步画图、导出」 | `origin_write_data` → `origin_plot` → `origin_export` |
+| 「用 Origin 画 y=x²（x=1..10）的折线图」 | `origin_write_data` → `origin_plot` → `origin_view_graph` → `origin_save_project`（默认只给 OPJU） |
+| 「把这两列数据画成散点图，导出 SVG」 | `origin_plot` → `origin_export`（用户明确要图片时才导出） |
+| 「画完只给我 OPJU 工程文件」 | `origin_plot` → `origin_save_project` |
 
 ## 快速上手（skill + origin_help）
 
@@ -292,8 +329,8 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 | `origin_execute_plan` | **执行计划**（按 plan_id 写数→画图→导出） | `plan_id` |
 | `origin_plot_template` | **领域模板**：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel | `template_id`, `data` |
 | `origin_verify_graph` | **确定性反读**（轴标题/字号/几何/图例/文件完整性） | `graph`, `expected_*` |
-| `origin_save_project` | **保存可编辑 OPJU 工程** | `path` |
-| `origin_export_delivery` | **一键交付目录**（源文件同级，图片+OPJU+核验） | `graph`, `source_path`, `fmts` |
+| `origin_save_project` | **保存可编辑 OPJU 工程（默认交付物）** | `path` |
+| `origin_export_delivery` | 一键交付目录（图片+OPJU+核验；**仅用户明确要图片时**） | `graph`, `source_path`, `fmts` |
 | `origin_list_pages` | **列出全部页面**（图页/工作簿）+ 活动窗口 | 无 |
 | `origin_inspect_graph` | **巡检现状**：图层几何/曲线样式/轴/图例/页面尺寸 | `graph` |
 | `origin_edit_plot` | **逐条改曲线**：颜色/线宽/线型/符号/透明度/隐藏 | `graph`, `edits` |
@@ -549,6 +586,11 @@ dsh-origin-plugin/
 :: 用 DSH 自带 Node MCP SDK 握手（与 dsh-mcp-client 同款，机器无关自动探测）
 node smoke\mcp_handshake_test.mjs
 
+:: ⚠️ v2.8.0 起：smoke/tests 在 attach 模式下会被引擎拒绝（test_attach_blocked）。
+::    先关闭 Origin，再设 ORIGIN_SESSION=isolated 跑（隔离实例由脚本自己启动/退出清理）。
+::    详见 smoke\README.md；导出默认落 %TEMP%\dsh-origin-tests\output。
+set ORIGIN_SESSION=isolated
+
 :: COM 链路冒烟 / 进阶能力 / 科学分析
 .venv\Scripts\python.exe -X utf8 smoke\origin_com_smoke_test.py
 .venv\Scripts\python.exe -X utf8 smoke\advanced_test.py
@@ -566,7 +608,7 @@ node smoke\mcp_handshake_test.mjs
 
 ## 端到端验证清单
 
-- [ ] smoke 测试输出 `RESULT: OK`，`output\comtest.png` 存在
+- [ ] smoke 测试输出 `RESULT: OK`，`%TEMP%\dsh-origin-tests\output\comtest.png` 存在（v2.8.0 起测试默认写临时目录）
 - [ ] `--selftest` 输出 `SELFTEST OK`（含样式应用/幂等命名/预览/错误码/统计批）
 - [ ] `--concurrency-test` 输出 `CONCURRENCY-TEST OK`（8/8）
 - [ ] `--offline-test` 输出 `OFFLINE-TEST OK`（50 工具注册 + 计划流 + 文件 IO）

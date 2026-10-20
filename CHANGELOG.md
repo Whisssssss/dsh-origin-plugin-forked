@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.8.0 (2026-10-21) — `/origin` 斜杠指令 + DSH 0.2.x 排障沉淀
+
+### 新增
+- **DSH 斜杠指令 `/origin [需求]`**：在对话里直接表明"要用 Origin 作图"，
+  不必再手写长提示词。命令把工作流纪律（先 `origin_help`、歧义先问、
+  快路径 `origin_plot`、交付前 `verify/view`、最终只交付 OPJU、不虚构数据）交给模型并起一轮对话。
+  - 全局命令（所有 agent 可见）；空参数时只进入作图模式并先反问需求。
+  - 命令本身按 DSH 语义**对模型不可见**，因此用 `agent.steer()` 注入一条
+    user-role 消息（与 dsh-imagegen 的写法一致），而非依赖命令行本身。
+  - 通过可选注入 `ctx.commands` 注册：没有 commands 服务的旧运行时自动跳过，
+    不影响插件加载（无新增运行时依赖）。
+  - **支持附件**：声明 `input.attachments` 后，CSV/XLSX 等文件块随 steer 消息发给模型
+    （文件块被 DSH 投影成"只读副本路径"，模型用 `origin_load_file` 导入）；
+    图片块原样透传但仅作参考，不凭图估算数值。
+- **交付策略改为「只交付 OPJU」**：最终产物只保存可编辑工程（`origin_save_project`），
+  **不主动导出图片/PPT/交付目录**——图片由用户自行导出；只有用户明确要求时才走
+  `origin_export` / `origin_export_pptx` / `origin_export_delivery`。
+  `origin_help` 新增 `delivery_policy` 字段；`/origin` 提示词、`origin-plotting` skill、
+  AGENTS 规则与 README 同步更新。
+- **修复 `/origin` 触发整轮失败**：注入消息最初沿用已停用的 `{kind:'plugin', plugin:…}`
+  旧来源包装，DSH 0.2.x 的 session 格式 v4 会拒收并让整轮报
+  `format v4 message requires a producer-owned source kind`。改为插件专属
+  `source: { kind: 'origin-command' }`；集成冒烟新增 v4 source 准入回归断言
+  （同时断言旧包装确实会被拒）。
+- **修复 Ctrl+C 误报**：DSH 停机/重启时控制台会把 Ctrl+C 广播给子进程，
+  MCP server 原先会从 stdio 读循环抛出 `KeyboardInterrupt` traceback（看着像崩溃）。
+  新增 `main()` 入口统一捕获并静默退出，附离线单测。
+- `smoke/origin_command_test.mjs`：离线冒烟（不依赖 Origin / DSH），覆盖注册、
+  附件声明与透传、参数、steer 消息、空输入、缺少 commands/steer 的降级路径与卸载 disposer。
+- `smoke/origin_command_integration.mjs`：用本机 DSH 的真实 `@deepseek-ai/dsh-commands`
+  注册并执行一次 `/origin`，验证「命令 → handler → `agent.steer`」全链路（需本机 DSH）。
+
+### 修复（P0）：测试/smoke 不得污染用户 Origin 工程
+
+> 真机事故：在用户已打开工程的机器上跑 `pytest tests/`，attach 模式把
+> `Contour*`/`Graph*`/`M*` 等测试页写进用户工程，随后全量保存让工程 21 KB → 400 KB。
+
+- **引擎级防污染守卫**（`origin_engine._test_attach_guard`）：识别 pytest 与
+  `smoke/`、`tests/` 脚本；attach 模式下**拒绝连接**（新错误码
+  `test_attach_blocked`，零副作用），只有显式 `DSH_ORIGIN_ALLOW_ATTACH_TESTS=1`
+  才放行。正常 MCP 作图任务（非测试进程）不受影响。
+- **测试绝不杀用户 Origin**：`tests/conftest.py` 固定 `DSH_ORIGIN_AUTOKILL=0`；
+  隔离模式连接时引擎也强制关闭 autokill；测试进程退出时只清理"它自己启动的" Origin PID。
+- **真机用例默认跳过**（`tests/test_live.py`）：需显式
+  `DSH_ORIGIN_LIVE_TESTS=1` + 建议 `ORIGIN_SESSION=isolated`；fixture 记录 baseline
+  页面快照，收尾**只关闭本次新增页**并断言页面集合回到 baseline（失败/中断也清理）。
+- **测试产物不落用户目录**：新增 `DSH_ORIGIN_OUTPUT_DIR` 支持；测试/冒烟进程默认
+  输出到 `%TEMP%\dsh-origin-tests\output`。
+- **`origin_save_project` 返回实际保存页清单**（`pages`/`pages_count`）；传入
+  `pages`/`exclude` 时明确回报 `ignored_selection` + warning（当前版本只支持全量保存）。
+- **`origin_pages_gc` 支持基线清理**：`baseline=[...]` 时只删快照之后新增的页面，
+  不 closeAll、不动用户原有页面（人工补救与测试收尾都用它）。
+- 文档：`COMPATIBILITY.md` 新增 **§8 测试与 smoke 不得污染用户工程**；
+  `AGENTS.md` 增加硬规则第 8 条；新增 `smoke/README.md` 写明隔离跑法。
+
+### 文档（排障沉淀）
+- `COMPATIBILITY.md` 新增 **§7 DSH 运行时兼容（0.2.x）**：`dsh-mcp-client` 版本错代
+  导致运行时把 `mcp-origin` 整行禁用（`disabling profile plugin row "mcp-origin" …`）、
+  根因与修复，以及"系统 Python 缺 mcp/originpro → 工具静默不注册"的判别与处置。
+- 已知失败场景表补 **#16 版本错代**、**#17 Python 依赖缺失/静默失败**。
+- `README.md` 增加 `/origin` 用法与 DSH 版本对齐提示；`AGENTS.md` 补一行指令说明。
+
+### 兼容
+- 运行时依赖不变（仍只依赖 `@deepseek-ai/dsh-mcp-client`）；旧 DSH 上 `/origin` 自动不出现。
+
 ## 2.7.3 (2026-09-18) — 热修（P0）
 
 **修复 issue #1：装了插件后 DSH 完全无法启动（`TypeError: Invalid effect`）。**

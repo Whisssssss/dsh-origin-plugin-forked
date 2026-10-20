@@ -27,6 +27,13 @@
 6. **读回不是证据**：返回值里的 `proof_level` 三级——
    `verified`（写入且读回一致）才能当证据；`readback_only` 需目视确认；`unverified` 必须调 `origin_view_graph` 看图。
 7. **引用原样传递**：`origin_write_data` / `origin_load_file` 返回 `worksheet`，`origin_plot*` 返回 `graph`，后续直接传返回值。
+8. **测试/冒烟不碰用户工程**：pytest 与 `smoke/` 脚本在 attach 模式下会被引擎拒绝
+   （错误码 `test_attach_blocked`）；要跑真机测试先关闭 Origin，再设
+   `ORIGIN_SESSION=isolated` 与 `DSH_ORIGIN_LIVE_TESTS=1`。清理只能用 baseline 差集
+   （`origin_pages_gc(baseline=[...])`），禁止 closeAll。
+9. **最终交付只给 OPJU 源文件**：默认只调 `origin_save_project(path)`，回复里给 OPJU 路径；
+   **不要主动导出图片/PPT/交付目录**——图片由用户自行导出。自检用 `origin_view_graph`
+   （内联，不落盘）或 `origin_verify_graph`（读回，不落盘）。只有用户明确要图片时才导出。
 
 ---
 
@@ -35,7 +42,7 @@
 | 文件 | 什么时候读 |
 |---|---|
 | [`skills/origin-plotting/SKILL.md`](skills/origin-plotting/SKILL.md) | **画图/改图前必读**——主循环图 + 七步流程 + 铁律 |
-| [`COMPATIBILITY.md`](COMPATIBILITY.md) | **动手前扫一眼**——15 条实测失败场景与替代方案（3D 轴标题、heatmap 静默失败、图例坐标陷阱…） |
+| [`COMPATIBILITY.md`](COMPATIBILITY.md) | **动手前扫一眼**——17 条实测失败场景与替代方案（3D 轴标题、heatmap 静默失败、DSH 0.2.x 版本错代…） |
 | [`skills/origin-stats/SKILL.md`](skills/origin-stats/SKILL.md) | 做统计检验（t/ANOVA/PCA/生存分析）时 |
 | [`skills/origin-scripting/SKILL.md`](skills/origin-scripting/SKILL.md) | 用户想拿脚本自己在 Origin 里跑（不需要 MCP）时 |
 | [`skills/install-dsh-origin/SKILL.md`](skills/install-dsh-origin/SKILL.md) | 安装/排障时 |
@@ -58,6 +65,11 @@
 - **声明式**：`origin_spec_export/import`（FigureSpec YAML，可 diff、可重放）
 
 完整清单与参数以 `origin_catalog` / `origin_help` 的**运行时返回**为准（文档与实现同步维护）。
+
+**DSH 斜杠指令**：`/origin [需求]`（v2.8.0+）——用户在 DSH 里用这条命令表明
+"要用 Origin 作图"时，你收到的是已注入的工作流提示（先 `origin_help`、歧义先问、
+快路径 `origin_figure`、交付前 verify/view、不虚构数据）。非 DSH 客户端没有这条命令，
+按用户原话走即可。
 
 ---
 

@@ -353,8 +353,8 @@ def warmup_impl(op, start_origin=True):
 # ---------------------------------------------------------------------------
 # 3) 页堆积治理
 # ---------------------------------------------------------------------------
-def pages_gc_impl(op, threshold=200, dry_run=True):
-    """页堆积治理：项目页数 > threshold 时清理。
+def pages_gc_impl(op, threshold=200, dry_run=True, baseline=None):
+    """页堆积治理：项目页数 > threshold 时清理；或按 baseline 只清理"新增页"。
 
     实测：793 页时 list_pages 30.9s、单次 close 59.2s——故 dry_run 只报告，
     真正清理（closeAll）可能很慢，需耐心等待看门狗。
@@ -362,10 +362,14 @@ def pages_gc_impl(op, threshold=200, dry_run=True):
     Args:
         op: originpro 模块对象
         threshold: 页数阈值（默认 200）
-        dry_run: True（默认）只报告；False 用 _manage_pages_impl(closeAll) 清理
+        dry_run: True（默认）只报告；False 执行清理
+        baseline: 页面短名列表（快照）。提供时**只清理快照之后新增的页面**，
+                  绝不 closeAll，也绝不关闭用户原有页面（测试/冒烟的安全收尾，
+                  也适合人工补救"跑测试污染了工程"的场景）。
     Returns:
         oerr.ok，含 pages_count / over_threshold / suggestion；
-        dry_run=False 时附 removed / n_removed / pages_left 清理清单。
+        dry_run=False 时附 removed / n_removed / pages_left 清理清单；
+        提供 baseline 时附 baseline_cleanup=True / new_pages / n_new。
     """
     import origin_engine as _eng
 
@@ -380,6 +384,36 @@ def pages_gc_impl(op, threshold=200, dry_run=True):
     if not lp.get("ok"):
         return lp
     count = int(lp.get("count", 0))
+
+    # baseline 模式：只删快照之后新增的页面（绝不 closeAll）
+    if baseline is not None:
+        try:
+            base = {str(n) for n in baseline}
+        except TypeError:
+            return oerr.fail("invalid_request",
+                             "baseline 必须是页面短名列表（如 ['Book1','Graph1']）")
+        new_names = [p.get("name") for p in (lp.get("pages") or [])
+                     if p.get("name") and str(p.get("name")) not in base]
+        if not new_names:
+            return oerr.ok(
+                pages_count=count, baseline_cleanup=True, new_pages=[],
+                n_new=0, dry_run=dry_run,
+                detail="自 baseline 以来没有新增页面，无需清理")
+        if dry_run:
+            return oerr.ok(
+                pages_count=count, baseline_cleanup=True, new_pages=new_names,
+                n_new=len(new_names), dry_run=True,
+                detail=f"[dry_run] 自 baseline 以来新增 {len(new_names)} 页：{new_names}")
+        cl = _eng._manage_pages_impl("close", pages=new_names)
+        if not cl.get("ok"):
+            return cl
+        return oerr.ok(
+            pages_count=count, baseline_cleanup=True, new_pages=new_names,
+            n_new=len(new_names), dry_run=False,
+            removed=cl.get("removed"), n_removed=cl.get("n_removed"),
+            pages_left=cl.get("pages_left"),
+            detail=cl.get("detail"))
+
     over = count > int(threshold)
 
     if not over:

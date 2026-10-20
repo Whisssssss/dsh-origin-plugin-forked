@@ -202,6 +202,12 @@ CODE_META: Dict[str, tuple] = {
         ["脚本含已知静默失败命令（不报错但悄悄不干活）",
          "按返回的 alternative 换替代写法；确知风险可带 force_silent=true 放行"],
     ),
+    "test_attach_blocked": (
+        False,
+        ["测试/冒烟脚本默认禁止 attach 到用户正在使用的 Origin（会污染工程）",
+         "关闭 Origin 后设 ORIGIN_SESSION=isolated 重跑；或显式 DSH_ORIGIN_ALLOW_ATTACH_TESTS=1",
+         "正常 MCP 作图任务不受影响（只有 tests/ 与 smoke/ 脚本触发）"],
+    ),
 }
 
 VALID_CODES = frozenset(CODE_META)
@@ -321,6 +327,12 @@ RECOVERY_MAP: Dict[str, Dict[str, Any]] = {
     "no_data_to_fit": {
         "policy": RECOVERY_POLICY_FIX,
         "diagnose": ["origin_read_worksheet 查看 x/y 列数据"],
+    },
+    "test_attach_blocked": {
+        "policy": RECOVERY_POLICY_NO,
+        "diagnose": ["确认当前是测试/冒烟脚本（tests/ 或 smoke/）",
+                     "关闭 Origin 后改用 ORIGIN_SESSION=isolated 重跑",
+                     "人工补救：origin_pages_gc(baseline=[...]) 只删新增页"],
     },
     "insufficient_data": {
         "policy": RECOVERY_POLICY_FIX,

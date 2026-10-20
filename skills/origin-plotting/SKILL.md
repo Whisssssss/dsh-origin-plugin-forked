@@ -7,21 +7,24 @@ whenToUse: 用户要求用 Origin 画图、导入数据、拟合/FFT/统计分�
 # Origin SOP v2.3.0（决策流驱动；工具挂在步骤下，按序调用）
 
 ## 宿主注入的默认规范（systemPrompt 已带；没有时你按此执行）
-- 折线/散点默认 `plot_type="line_symbol"`；未指定导出参数时 `fmt="png"`, `width=1200`。
-- 投稿/发表图默认 `style_mode="journal"`（单栏 89mm / 双栏 183mm），导出 `width>=1800`。
+- 折线/散点默认 `plot_type="line_symbol"`。
+- **交付策略：最终只交付可编辑 OPJU（`origin_save_project`）；默认不导出任何图片/PPT，图片由用户自行导出。**
+  仅当用户明确说"导出图片/给 PNG/要 PPT/完整交付目录"时，才用 `origin_export` / `origin_export_pptx` /
+  `origin_export_delivery`；此时 PNG 宽度默认 `1200`，投稿图 `>=1800`。
+- 投稿/发表图默认 `style_mode="journal"`（单栏 89mm / 双栏 183mm）。
 - 轴标题必须语义化：物理量 + 单位（`temperature_C` → "Temperature (°C)"），拒绝 A/B/C 占位名。
 - 多组对比 / 列语义不明 / 发表级图：**强制** `origin_plot_plan` → 用户确认 → `origin_execute_plan`（见 STEP 3）。
 
 ## 快速路径 vs 正式路径（先选路，再动手）
-- **快速路径**（数据语义明确、临时查看）：`origin_plot_file` / `origin_load_file`+`origin_plot`，一次调用出图。
-- **正式路径**（发表级 / 多组对比 / 列语义不明 / 用户没说清）：`origin_plot_plan` → 向用户确认 questions → `origin_execute_plan` → `origin_verify_graph` → `origin_export_delivery`。
+- **快速路径**（数据语义明确、临时查看）：`origin_write_data`/`origin_load_file` + `origin_plot`（只建图，不导出）。
+- **正式路径**（发表级 / 多组对比 / 列语义不明 / 用户没说清）：`origin_plot_plan` → 向用户确认 questions → `origin_execute_plan` → `origin_verify_graph` → `origin_save_project`。
 - 想不起调用链 → `origin_cookbook`（离线秒回：quick_plot/from_file/journal/multi_compare/edit/fit/recover/deliver 八场景 + 高频工具推荐默认参数）。
 
 ## 主循环（先看这张图，再往下读）
 
 ```
 [0] 提速判断（默认走快路径）
-     │ 90% 场景：一次 origin_figure 完成 写数/导入→画图→验证→导出（~1s）→ 直接 [7]
+     │ 90% 场景：origin_write_data/load_file → origin_plot → view_graph 自检 → save_project（~1s）
      │ 只在 需要细改 / 多组对比 / 发表级精修 时才进 [1] 的完整流程
 [1] origin_status 检查环境
      │ 失败 → origin_diagnose 定位（安装/COM/残留进程/目录权限）→ 按 recovery 修复
@@ -33,7 +36,7 @@ whenToUse: 用户要求用 Origin 画图、导入数据、拟合/FFT/统计分�
      └─ 只要数字不要图 ─→ 附录B 分析工具 / origin-stats skill，结果直接回复用户
 [5] origin_verify_graph ── pass/warn → [7]
      └── fail → [6] 按错误码修复 → 回 [5]（同一问题 2 轮仍 fail：停止重试，如实报告）
-[7] 交付：export_delivery / export / save_project → 回复用户路径 + verify 结论
+[7] 交付：只 save_project（OPJU）→ 回复路径 + verify 结论（不导出图片）
 ```
 
 ## STEP 0 铁律（每条都对应实测过的返工，违反必出错）
@@ -45,6 +48,9 @@ whenToUse: 用户要求用 Origin 画图、导入数据、拟合/FFT/统计分�
 6. 正式交付前必过 `origin_verify_graph`；`fail` 项修完才允许交付。
 7. **同签名重新 plan 过就别执行旧计划**：`origin_execute_plan` 会校验（`plan_stale`）；确实要执行旧计划传 `force=true`。
 8. 每次调用返回都带 `trace_id` + `duration_ms`：向用户报告故障时附上，便于定位失败阶段。
+9. **最终交付只保存 OPJU**（`origin_save_project`）；**不要主动导出图片/PPT/交付目录**——图片由用户自行导出。
+   用户明确要图片时才导出，并在回复里说明导出的是哪一张。自检一律用 `origin_view_graph`（内联）或
+   `origin_verify_graph`（读回），两者都不落盘。
 
 ## STEP 1 检查环境（每个会话首次 Origin 操作前）
 调 `origin_status`：
@@ -184,13 +190,15 @@ whenToUse: 用户要求用 Origin 画图、导入数据、拟合/FFT/统计分�
 
 同一问题修复 2 轮仍 fail：停止重试，如实向用户报告已做/未做 + `origin_view_graph` 渲染图给用户决策。
 
-## STEP 7 交付（按用户要什么给什么）
-- 要"完整交付物" → `origin_export_delivery(graph, source_path='数据.csv', fmts='png,pdf')`：
-  源文件同级建 `<数据名>_Origin_<时间戳>/` 收纳图片 + **可编辑 OPJU** + 数据 csv + 报告 txt 并逐文件核验（原始数据只读不动）。
-  设置了 `DSH_ORIGIN_NO_AUTO_SAVE=1` 时 OPJU 不自动写，issues 里会提示 → **提醒用户 Ctrl+S**。
-- 只要图片 → `origin_export(graph, fmt='png', width=1200)`（png/svg/pdf/tif/emf；引擎内置三级回退链与文件头校验）。
-- 只存工程 → `origin_save_project(path)`（省略扩展名自动补 .opju）。
-- 最终回复 = 交付文件路径 + verify 结论一句话（warn 一并告知）。
+## STEP 7 交付（默认只给 OPJU）
+- **默认（绝大多数情况）→ `origin_save_project(path)`**：只保存可编辑 OPJU（省略扩展名自动补 .opju），
+  回复里给 OPJU 绝对路径 + verify 结论；**不要导出图片**，用户会自己在 Origin 里导。
+- 设置了 `DSH_ORIGIN_NO_AUTO_SAVE=1` 时 OPJU 不自动写 → **提醒用户 Ctrl+S**。
+- **只有用户明确要图片/PPT/完整交付目录时**才导出：
+  - 图片 → `origin_export(graph, fmt='png', width=1200)`（png/svg/pdf/tif/emf）；
+  - 交付目录（图片+OPJU+csv+报告）→ `origin_export_delivery(graph, source_path='数据.csv', fmts='png,pdf')`；
+  - PPT → `origin_export_pptx(...)`。
+- 最终回复 = OPJU 路径（或用户明确要求的导出文件）+ verify 结论一句话（warn 一并告知）。
 
 ## 附录 A 领域模板（origin_plot_template）
 所有模板都支持 `x_title` / `y_title` 覆盖轴标题（多系列 y 轴不再自动猜标题，
