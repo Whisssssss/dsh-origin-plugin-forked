@@ -1,4 +1,35 @@
-# Changelog
+## 2.9.0 (2026-10-21) — 任务隔离模式 + 会话健壮性修复
+
+### 新增：任务隔离（`ORIGIN_SESSION=exclusive`）
+- 连接改用 `OriginExt.ApplicationCOMSI()` **COM 专用隐藏实例**，不再附着用户手动打开的 Origin；
+  每个任务一个临时工程：新图 `op.new()`，改图把真 OPJU 复制到临时目录后 `op.open()`。
+- 新增工具：`origin_task_begin` / `origin_task_commit` / `origin_task_abort` / `origin_task_status`。
+  - commit：保存临时文件 → 校验大小/页数 → 先关闭工程释放句柄 → `os.replace` **原子替换**真 OPJU
+    → 关闭专用实例 → 删除临时文件；失败时真 OPJU 不被覆盖，可重试或 abort。
+  - 每任务新建实例约 2.7–4 秒；`close_instance=false` 可保留实例（工程隔离仍然有效）。
+- `origin_help` 增加 `session.task_isolation` 与任务流程；`origin_status` 增加
+  `session_mode/task_isolation/task_active`；`/origin` 提示词与 skill 同步。
+
+### 修复：2026-10 真机会话复盘的 4 类问题
+1. **陈旧 COM 连接缓存**：`_connect_impl` 命中缓存时先做 `op.path()` 探活，失败立即清缓存并重连；
+   `_describe_impl` 的 `op.path()` 加 try；`origin_diagnose` 的 `engine_connected` 改为真实探活
+   （新增 cached/stale_cache/probe_error），不再只回缓存标志。
+2. **JSON 非严格**：新增 `_sanitize_json/_dumps`，NaN/Inf 递归转 `null`、`allow_nan=False`；
+   `_text`、工具结果、JSON-RPC 响应、resources 全部走严格序列化（修复 JSON.parse
+   "Unexpected token 'N'"）。
+3. **编码误判**：先认 BOM/UTF-8；少量高位字节且 GBK 解出 CJK 时优先 cp1252/latin-1。
+   Origin 导出的 `Lamp,µF` 不再被 GBK 解成 `礔`（encoding 正确报 cp1252）。
+4. **verify/apply_style 假报**：
+   - `origin_verify_graph` 的 `x/y_title_font_pt` 实际读的是 `label.fsize`（刻度标签），
+     改名为 `x/y_label_font_pt` 并修正描述；COM 无可靠标题字号通道，不再冒称。
+   - `origin_apply_style` 未传 `columns` 时不再用 `S1` 推断覆盖标题；轴标题写入改用
+     `set_axis_title_checked` 读回验证，失败写入 `title_warnings`，不再谎报 `applied`。
+5. **shutdown 哨兵 bug**：无存活 COM 线程时不再投递 `None`，避免下一次调用新线程吃掉哨兵
+   导致首个调用假死 105s（冒烟实测并修复）。
+
+### 测试
+- 离线 pytest 25 passed（新增编码/严格 JSON/探活/任务入口/shutdown 回归）。
+- `smoke/task_isolation_test.py`：COMSI 新建→写数→画图→commit→open→abort 全链路 PASS。
 
 ## 2.8.0 (2026-10-21) — `/origin` 斜杠指令 + DSH 0.2.x 排障沉淀
 

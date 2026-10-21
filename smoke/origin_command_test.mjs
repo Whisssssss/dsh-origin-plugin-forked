@@ -106,6 +106,7 @@ check('prompt carries the user request', typeof text === 'string' && text.includ
 check('prompt carries the workflow (origin_help)', typeof text === 'string' && text.includes('origin_help'))
 check('prompt carries the plotting path (origin_plot)', typeof text === 'string' && text.includes('origin_plot'))
 check('prompt requires OPJU-only delivery', typeof text === 'string' && text.includes('origin_save_project') && text.includes('不要导出图片'))
+check('prompt carries task-isolation flow', typeof text === 'string' && text.includes('origin_task_begin') && text.includes('origin_task_commit'))
 check('no attachments means text-only content', Array.isArray(message.content) && message.content.length === 1)
 
 // 3) 附件透传：文件块 + 图片块随消息发送，提示词点名文件

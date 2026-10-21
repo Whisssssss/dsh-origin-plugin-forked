@@ -29,6 +29,7 @@ Profile：ORIGIN_MCP_PROFILE=compact 时隐藏统计批(ttest/anova/pca/survival
     python origin_mcp_server.py --concurrency-test # 8 并发调用稳定性测试（需 Origin）
 """
 import json
+import math
 import os
 import sys
 import threading
@@ -36,6 +37,11 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent, ImageContent
+
+try:  # 只用于 JSON 输出层的 numpy 标量识别（engine 已依赖 numpy）
+    import numpy as _np_sanitize
+except Exception:  # pragma: no cover
+    _np_sanitize = None
 
 import origin_engine as engine
 
@@ -81,6 +87,10 @@ TOOL_CATALOG = [
     {"name": "origin_cookbook", "group": "连接与诊断", "desc": "场景→工具组合速查：常见调用链 + 推荐默认参数（离线秒回）"},
     {"name": "origin_list_graphs", "group": "连接与诊断", "desc": "列出当前项目的图页短名"},
     {"name": "origin_list_sheets", "group": "连接与诊断", "desc": "列出当前项目的工作簿/工作表页"},
+    {"name": "origin_task_begin", "group": "连接与诊断", "desc": "开始隔离任务（COMSI 专用实例 + 临时工程；exclusive 模式）"},
+    {"name": "origin_task_commit", "group": "交付与验证", "desc": "任务落盘为真 OPJU（原子替换）并关闭专用实例"},
+    {"name": "origin_task_abort", "group": "连接与诊断", "desc": "放弃隔离任务（真 OPJU 不动）"},
+    {"name": "origin_task_status", "group": "连接与诊断", "desc": "查看当前隔离任务与页面清单"},
     # data
     {"name": "origin_write_data", "group": "数据", "desc": "把多列数据写入 Origin 工作表"},
     {"name": "origin_load_file", "group": "数据", "desc": "导入本地表格文件 CSV/TXT/XLSX/XLS（中文路径/编码安全）"},
@@ -163,8 +173,32 @@ if _EXTENDED:
     ]
 
 
+def _sanitize_json(value):
+    """把 NaN/Infinity 递归替换成 None，保证输出是严格 JSON。
+
+    2026-10 修复（真机 issue）：Origin 空单元格读回 float('nan')，
+    旧实现 json.dumps 默认 allow_nan=True 会输出裸 NaN，任何严格 JSON.parse
+    都会报 "Unexpected token 'N'"。
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_json(v) for v in value]
+    # numpy 标量（originpro 读回的列值可能是 np.float32/64）
+    if _np_sanitize is not None and isinstance(value, _np_sanitize.generic):
+        return _sanitize_json(value.item())
+    return value
+
+
+def _dumps(value) -> str:
+    """严格 JSON 序列化：NaN/Inf → null，allow_nan=False。"""
+    return json.dumps(_sanitize_json(value), ensure_ascii=False, allow_nan=False)
+
+
 def _text(obj) -> TextContent:
-    return TextContent(type="text", text=json.dumps(obj, ensure_ascii=False))
+    return TextContent(type="text", text=_dumps(obj))
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +594,42 @@ def origin_figure(columns: dict = None, data_source: str = "",
 
 
 @mcp.tool()
+def origin_task_begin(mode: str = "new", target_path: str = "",
+                      source_path: str = "") -> dict:
+    """开始一个隔离作图任务（需要 ORIGIN_SESSION=exclusive）。
+
+    - mode="new"：在 COM 专用实例里新建空白临时工程；
+    - mode="open"：把 target_path/source_path 指向的真 OPJU 复制到临时目录并打开；
+    - 作图/分析结束后必须 origin_task_commit 原子落盘，或 origin_task_abort 放弃。
+    """
+    return engine.task_begin(mode=mode, target_path=target_path or None,
+                             source_path=source_path or None)
+
+
+@mcp.tool()
+def origin_task_commit(target_path: str = "",
+                       close_instance: bool = True) -> dict:
+    """把隔离任务保存为真 OPJU：临时文件校验后原子替换，并关闭专用实例。
+
+    真 OPJU 只有在 os.replace 成功那一刻才更新；失败时保留任务以便重试。
+    """
+    return engine.task_commit(target_path=target_path or None,
+                              close_instance=close_instance)
+
+
+@mcp.tool()
+def origin_task_abort() -> dict:
+    """放弃当前隔离任务：关闭专用实例、删除临时工程；真 OPJU 不动。"""
+    return engine.task_abort()
+
+
+@mcp.tool()
+def origin_task_status() -> dict:
+    """查看当前隔离任务状态（任务 id / 模式 / 目标路径 / 当前页面）。"""
+    return engine.task_status()
+
+
+@mcp.tool()
 def origin_warmup(start_origin: bool = True) -> dict:
     """预热 Origin 连接（把冷启动成本挪到用户不感知的时刻）。"""
     return engine.warmup(start_origin=start_origin)
@@ -932,7 +1002,7 @@ def origin_view_graph(graph: str = "", max_width: int = 1400) -> list:
     b64 = r.get("image_png_base64", "")
     return [
         TextContent(type="text",
-                    text=json.dumps(summary, ensure_ascii=False)),
+                    text=_dumps(summary)),
         ImageContent(type="image", data=b64, mime_type="image/png"),
     ]
 
@@ -1855,15 +1925,15 @@ def _result_to_content_blocks(result):
                 blocks.append({"type": "image", "data": data or "", "mimeType": mime or "image/png"})
             elif isinstance(item, dict):
                 blocks.append(item)
-        return blocks or [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
+        return blocks or [{"type": "text", "text": _dumps(result)}]
     if isinstance(result, dict):
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
+        return [{"type": "text", "text": _dumps(result)}]
     return [{"type": "text", "text": str(result)}]
 
 
 def _write_jsonrpc(resp):
     """写一行 JSON-RPC 到 stdout（二进制 buffer + 显式 flush，避免 CRLF/缓冲吞响应）。"""
-    payload = json.dumps(resp, ensure_ascii=False) + "\n"
+    payload = _dumps(resp) + "\n"
     try:
         sys.stdout.buffer.write(payload.encode("utf-8"))
         sys.stdout.buffer.flush()
@@ -1965,8 +2035,7 @@ def _sync_stdio_server():
                 body = {"ok": False, "error": str(e)}
             _write_jsonrpc({"jsonrpc": "2.0", "id": msg_id, "result": {
                 "contents": [{"uri": uri, "mimeType": "application/json",
-                              "text": json.dumps(body, ensure_ascii=False,
-                                                 default=str)}]}})
+                              "text": _dumps(body)}]}})
         elif method == "tools/list":
             _write_jsonrpc({"jsonrpc": "2.0", "id": msg_id,
                             "result": {"tools": list(registry.values())}})
@@ -1978,9 +2047,9 @@ def _sync_stdio_server():
             fn = tool_fns.get(tname)
             if fn is None:
                 _write_jsonrpc({"jsonrpc": "2.0", "id": msg_id, "result": {
-                    "content": [{"type": "text", "text": json.dumps(
+                    "content": [{"type": "text", "text": _dumps(
                         {"ok": False, "error": f"unknown tool: {tname}",
-                         "error_code": "UNKNOWN_TOOL"}, ensure_ascii=False)}],
+                         "error_code": "UNKNOWN_TOOL"})}],
                     "isError": True,
                 }})
             else:
@@ -1995,11 +2064,11 @@ def _sync_stdio_server():
                 except Exception as exc:
                     import traceback
                     _write_jsonrpc({"jsonrpc": "2.0", "id": msg_id, "result": {
-                        "content": [{"type": "text", "text": json.dumps({
+                        "content": [{"type": "text", "text": _dumps({
                             "ok": False, "error": str(exc),
                             "error_code": "TOOL_EXCEPTION",
                             "traceback": traceback.format_exc(),
-                        }, ensure_ascii=False)}],
+                        })}],
                         "isError": True,
                     }})
         else:

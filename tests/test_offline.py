@@ -181,3 +181,89 @@ def test_connect_refuses_attach_under_tests(monkeypatch):
     monkeypatch.setenv("ORIGIN_SESSION", "attach")
     ok, r = eng._connect_impl()
     assert not ok and r.get("error_code") == "test_attach_blocked"
+
+
+# ---------------------------------------------------------------------------
+# 编码探测：latin-1/cp1252 的 µ 不能被 GBK 抢先生效（真机 issue）
+# ---------------------------------------------------------------------------
+def test_decode_bytes_cp1252_micro_sign():
+    import origin_fileio as fio
+    raw = b"Labels,x\r\nLamp,\xb5F,\r\n300,1.0\r\n"
+    text, enc = fio._decode_bytes(raw)
+    assert enc == "cp1252"
+    assert "Lamp,\u00b5F" in text
+
+
+def test_decode_bytes_gbk_chinese_still_gbk():
+    import origin_fileio as fio
+    raw = "标签,数值\n温度,25\n".encode("gbk")
+    text, enc = fio._decode_bytes(raw)
+    assert enc == "gbk"
+    assert "标签" in text
+
+
+def test_decode_bytes_utf8_and_utf16():
+    import origin_fileio as fio
+    text, enc = fio._decode_bytes("标签,数值\n".encode("utf-8"))
+    assert enc == "utf-8" and "标签" in text
+    text, enc = fio._decode_bytes("标签,数值\n".encode("utf-16"))
+    assert enc == "utf-16" and "标签" in text
+
+
+# ---------------------------------------------------------------------------
+# JSON 序列化：NaN/Inf 必须变成 null（真机 issue：JSON.parse Unexpected token 'N'）
+# ---------------------------------------------------------------------------
+def test_strict_json_sanitizes_nan_and_inf():
+    import json as _json
+    import origin_mcp_server as oms
+
+    text = oms._dumps({"a": float("nan"), "b": [float("inf"), -float("inf")], "c": 1})
+    assert "NaN" not in text and "Infinity" not in text
+    assert _json.loads(text) == {"a": None, "b": [None, None], "c": 1}
+
+
+# ---------------------------------------------------------------------------
+# 连接活性探测：死 COM 代理必须被识别，缓存要被清掉
+# ---------------------------------------------------------------------------
+def test_probe_connection_detects_dead_proxy(monkeypatch):
+    import origin_engine as eng
+
+    class DeadApp:
+        def path(self):
+            raise RuntimeError("RPC 服务器不可用")
+
+    monkeypatch.setattr(eng, "_origin_app", DeadApp(), raising=False)
+    monkeypatch.setattr(eng, "_connected", True, raising=False)
+    alive, err = eng._probe_connection()
+    assert alive is False and "RPC" in str(err)
+    eng._reset_connection_cache("test")
+    assert eng._connected is False and eng._origin_app is None
+
+
+# ---------------------------------------------------------------------------
+# 任务隔离（exclusive）：入口校验与临时目录布局
+# ---------------------------------------------------------------------------
+def test_task_begin_requires_exclusive(monkeypatch):
+    import origin_engine as eng
+
+    monkeypatch.setenv("ORIGIN_SESSION", "attach")
+    monkeypatch.setattr(eng, "_TASK", None, raising=False)
+    r = eng._task_begin_impl(mode="new", target_path=None)
+    assert not r.get("ok") and r.get("error_code") == "task_isolation_unavailable"
+
+
+def test_task_dir_layout_is_next_to_target():
+    import origin_engine as eng
+
+    target = os.path.join("D:" + os.sep, "work", "figure.opju")
+    d = eng._task_dir("abcd1234", target)
+    assert d == os.path.join(os.path.dirname(target), ".dsh-origin-task-abcd1234")
+
+
+def test_shutdown_without_thread_does_not_poison_com_queue():
+    """回归：无线程时 shutdown 不应留下 None 哨兵，否则下一次调用假死 105s。"""
+    import origin_engine as eng
+
+    eng.shutdown()
+    assert eng._run_on_com_thread(lambda: 42) == 42
+    eng.shutdown()
