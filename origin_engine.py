@@ -70,6 +70,24 @@ _origin_app = None                # 惰性连接的 originpro 句柄（仅 COM �
 _connected = False
 _TASK = None                      # 当前隔离任务（exclusive 模式；见 task_begin/commit）
 
+# 连接自愈观测（P0-1）：实例丢失不再静默重建，重建次数与原因要能在
+# origin_status 里看到，便于事后判断"工程为什么空了"。
+_PROBE_RETRIES = 2                # 探活失败后的短重试次数（排除瞬时卡顿）
+_PROBE_RETRY_DELAY = 0.3          # 每次重试间隔（秒）
+_INSTANCE_EXIT_SETTLE_SECS = 2.0  # 关闭专用实例后，重建前的最短间隔（秒）
+_LAST_INSTANCE_EXIT_AT = None     # 最近一次关闭专用实例的时间戳
+_CONN_STATS = {
+    "restart_count": 0,            # 因实例丢失而重建连接的次数
+    "last_reset_reason": None,     # 最近一次丢弃 COM 缓存的原因
+    "last_reset_at": None,
+    "last_recovery": None,         # 最近一次从工作副本恢复任务的记录
+}
+# 结构级操作前的快照失败提示：由 _synchronized 统一附加到返回体 warning
+_SNAPSHOT_WARNINGS = []
+# 最近一次"实例重建 + 工作副本恢复"：由 _synchronized 注入到当次工具返回体
+# （P0-1 要求：恢复发生时返回体必须带 recovered / 恢复页数）
+_PENDING_RECOVERY = None
+
 # 画图类型 -> originpro add_plot type 参数（2D 基础）
 PLOT_TYPES = {
     "line": "l",          # 折线
@@ -400,6 +418,24 @@ class _WindowsNamedMutex:
         return False
 
 
+# P0-1（审查发现）：pending_move 状态下所有会改工程/写用户文件的入口
+# 必须 fail-closed。逐个 impl 加 guard 容易漏（实测漏了 20+ 个），
+# 这里在 _synchronized 层按公开工具名统一拦截。
+_WRITE_TOOL_NAMES = frozenset({
+    "manage_plots", "manage_data", "matrix_write", "matrix_plot",
+    "import_matplotlib", "figure", "pages_gc", "template_save",
+    "template_apply", "write_data", "plot", "plot_file", "filter_data",
+    "fit", "plot3d", "transform", "integrate", "fft", "correlate",
+    "peak_find", "histogram", "plot_contour", "apply_style", "load_file",
+    "save_project", "export", "export_delivery", "export_pptx",
+    "column_formula", "peak_fit", "mask_points", "add_line", "labtalk",
+    # 注意：装饰的是 _plot_template_task，不是普通函数 plot_template
+    "_plot_template_task", "execute_plan", "edit_plot", "edit_axis",
+    "edit_legend", "edit_page", "manage_pages", "add_text",
+    "origin_annotate",
+})
+
+
 def _synchronized(fn):
     """装饰器：公开函数 -> 投递到专用 COM 线程串行执行。
 
@@ -409,6 +445,15 @@ def _synchronized(fn):
     """
     def wrapper(*args, **kwargs):
         _configure_ipc_lock_if_requested()
+        # P0-1：待落盘的临时工程未处理时，任何写工具都直接拒绝，
+        # 避免"在已 op.new 的空工程上继续工作、旧 tmp 下次覆盖目标"的
+        # 静默丢失（含 load_file/matrix_write/import_matplotlib/save_project）。
+        if (_TASK is not None and _TASK.get("pending_move")
+                and fn.__name__ in _WRITE_TOOL_NAMES):
+            block = _pending_move_block(fn.__name__)
+            block["trace_id"] = f"t{uuid.uuid4().hex[:12]}"
+            block["duration_ms"] = 0
+            return block
         t0 = time.time()
         result = _run_on_com_thread(fn, *args, **kwargs)
         elapsed_ms = int((time.time() - t0) * 1000)
@@ -417,6 +462,17 @@ def _synchronized(fn):
         if isinstance(result, dict):
             result["trace_id"] = trace_id
             result["duration_ms"] = elapsed_ms
+            rec = _take_pending_recovery()
+            if rec:
+                result.setdefault("recovered", True)
+                result.setdefault("recovered_from", rec.get("from"))
+                result.setdefault("recovered_pages", rec.get("pages"))
+                result.setdefault("recovery", rec)
+            warns = _drain_snapshot_warnings()
+            if warns:
+                note = "；".join(warns)
+                result["warning"] = ((result.get("warning") + "；")
+                                     if result.get("warning") else "") + note
             if not result.get("ok") and "error_code" not in result:
                 return oerr.upgrade_legacy_failure(result)
             return result
@@ -424,7 +480,13 @@ def _synchronized(fn):
                 and isinstance(result[1], dict)):
             result[1]["trace_id"] = trace_id
             result[1]["duration_ms"] = elapsed_ms
+            rec = _take_pending_recovery()
+            if rec:
+                result[1].setdefault("recovered", True)
+                result[1].setdefault("recovery", rec)
+            _drain_snapshot_warnings()   # 防止快照 warning 泄漏到下一次调用
         return result
+    wrapper._dsh_synchronized = True   # 名单一致性测试用
     return wrapper
 
 
@@ -749,38 +811,202 @@ def _kill_residual_origin(wait_seconds=2.0):
     return info
 
 
-def _probe_connection():
+def _now_iso():
+    """本地时间 ISO 字符串（含时区偏移），用于事故时间线。"""
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _coerce_bool(value, default=False):
+    """严格解析布尔入参：字符串 "false"/"0" 不能被当成 True。
+
+    MCP 客户端/嵌入方可能把 bool 序列化成字符串；直接 bool("false") == True
+    会绕过 close_instance/force 等安全语义（审查发现 P1-1）。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+_ENGINE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "logs", "engine.log")
+_ENGINE_LOG_MAX = 2 * 1024 * 1024
+
+
+def _engine_log(event, **fields):
+    """P1-3：生命周期滚动日志（<插件>/logs/engine.log，超过 2MB 滚到 .1）。"""
+    try:
+        os.makedirs(os.path.dirname(_ENGINE_LOG), exist_ok=True)
+        if (os.path.isfile(_ENGINE_LOG)
+                and os.path.getsize(_ENGINE_LOG) > _ENGINE_LOG_MAX):
+            bak = _ENGINE_LOG + ".1"
+            try:
+                if os.path.isfile(bak):
+                    os.remove(bak)
+                os.replace(_ENGINE_LOG, bak)
+            except Exception:
+                open(_ENGINE_LOG, "w", encoding="utf-8").close()
+        rec = {"at": _now_iso(), "pid": os.getpid(), "event": event}
+        rec.update(fields)
+        with open(_ENGINE_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _probe_connection(retries=None, delay=None):
     """轻量 COM 活性探测：能调通 op.path() 才算连接还活着。
 
     2026-10 修复（真机 issue）：MCP server 长驻，Origin 进程退出后
     _connected/_origin_app 仍是旧值；旧代码命中缓存直接返回 True，
     下一次 COM 调用才在 _describe_impl 里炸出 RPC_E_DISCONNECTED。
+
+    P0-1：探活失败先短重试 2×300ms——实例崩溃/COM 忙时会瞬时拒绝，
+    立刻判死并重建空工程正是 2026-10-21 丢失任务工程的直接原因。
     """
     op = _origin_app
     if op is None:
         return False, "no_app"
-    try:
-        op.path()
-        return True, None
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {exc}"
+    tries = _PROBE_RETRIES if retries is None else max(0, int(retries))
+    wait = _PROBE_RETRY_DELAY if delay is None else max(0.0, float(delay))
+    last = None
+    for attempt in range(tries + 1):
+        try:
+            op.path()
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            last = f"{type(exc).__name__}: {exc}"
+            if attempt < tries:
+                time.sleep(wait)
+    return False, last or "probe_failed"
 
 
 def _reset_connection_cache(reason=""):
-    """丢弃已失效的 COM 缓存（下次调用走完整建连）。"""
+    """丢弃已失效的 COM 缓存（下次调用走完整建连），并记录重启计数。"""
     global _connected, _origin_app
     _connected = False
     _origin_app = None
     if reason:
+        _CONN_STATS["restart_count"] = int(_CONN_STATS.get("restart_count") or 0) + 1
+        _CONN_STATS["last_reset_reason"] = str(reason)
+        _CONN_STATS["last_reset_at"] = _now_iso()
         try:
             sys.stderr.write("[origin_engine] connection cache reset: %s\n" % reason)
             sys.stderr.flush()
         except Exception:
             pass
+        _engine_log(
+            "connection_reset", reason=str(reason),
+            restart_count=_CONN_STATS["restart_count"],
+            task_id=(_TASK or {}).get("id"),
+            origin_pids=(None if _running_under_tests()
+                         else sorted(_origin_proc_pids() or set())),
+            last_snapshot=(_TASK or {}).get("last_snapshot"))
+
+
+def _mark_instance_lost(reason, probe_error=None):
+    """P0-1：把"专用实例已丢失"写进当前任务（origin_task_status 可读出）。
+
+    没有快照时不得继续在空工程里作图，所有写操作由 _connect_impl 统一拦截。
+    """
+    if _TASK is None:
+        return None
+    working = _TASK.get("working")
+    info = {
+        "at": _now_iso(),
+        "reason": str(reason or "instance_unreachable")[:300],
+        "probe_error": (str(probe_error)[:300] if probe_error else None),
+        "working": working,
+        "working_exists": bool(working and os.path.isfile(working)),
+        "last_snapshot": _TASK.get("last_snapshot"),
+        "pages_before": _TASK.get("pages_before"),
+    }
+    _TASK["instance_lost"] = info
+    _engine_log("instance_lost", task_id=_TASK.get("id"),
+                reason=info.get("reason"),
+                working_exists=info.get("working_exists"),
+                pages_before=info.get("pages_before"),
+                last_snapshot=info.get("last_snapshot"))
+    return info
+
+
+def _task_instance_lost_fail(info=None):
+    """P0-1 的统一失败返回：任务实例丢失，禁止继续（recoverable + 下一步）。"""
+    info = info or (_TASK or {}).get("instance_lost") or {}
+    return oerr.fail(
+        "task_instance_lost",
+        "Origin 专用实例已丢失：任务工程不可信，已阻止在空工程上继续操作",
+        recoverable=True,
+        task_id=(_TASK or {}).get("id"),
+        instance_lost=info,
+        next_actions=[
+            "origin_task_status 查看 instance_lost / last_snapshot / pages_before",
+            "若 working 副本存在：再次调用任意工具会自动 op.open(working) 恢复",
+            "若恢复失败：origin_task_abort 放弃任务，再 origin_task_begin"
+            "(mode='open', source_path=原.opju) 重新开始",
+            "不要直接调 origin_task_commit（会写出空/退化工程）",
+        ],
+    )
+
+
+def _open_task_working(op, working):
+    """在重建后的实例里打开任务工作副本，返回 (ok, pages|错误字符串)。"""
+    try:
+        opened = bool(op.open(working))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    if not opened:
+        return False, "op.open 返回 False"
+    pages = None
+    try:
+        pages = int(op.po.Pages.Count)
+    except Exception:
+        pages = None
+    return True, pages
+
+
+def _note_task_recovery(working, pages, reason=None):
+    """记录一次成功的工作副本恢复（任务 + 全局统计 + 待冒泡返回体）。"""
+    global _PENDING_RECOVERY
+    rec = {"at": _now_iso(), "from": working, "pages": pages,
+           "reason": (str(reason)[:300] if reason else "instance_rebuilt")}
+    if _TASK is not None:
+        # 保留 instance_lost 键并置 None：origin_status/task_status 始终能读到该字段
+        _TASK["instance_lost"] = None
+        _TASK["recovery_count"] = int(_TASK.get("recovery_count") or 0) + 1
+        _TASK["last_recovery"] = rec
+    _CONN_STATS["last_recovery"] = rec
+    _PENDING_RECOVERY = rec
+    return rec
+
+
+def _take_pending_recovery():
+    """取出并清空待冒泡的恢复记录（_synchronized 调用）。"""
+    global _PENDING_RECOVERY
+    rec = _PENDING_RECOVERY
+    _PENDING_RECOVERY = None
+    return rec
+
+
+def _drain_snapshot_warnings():
+    """取出并清空待冒泡的快照失败提示（_synchronized 调用）。"""
+    global _SNAPSHOT_WARNINGS
+    warns = list(_SNAPSHOT_WARNINGS)
+    _SNAPSHOT_WARNINGS = []
+    return warns
 
 
 def _connect_impl():
     global _connected, _origin_app
+    lost_probe_error = None
     if _connected and _origin_app is not None:
         alive, probe_error = _probe_connection()
         if alive:
@@ -789,8 +1015,22 @@ def _connect_impl():
             except Exception as exc:  # noqa: BLE001
                 _reset_connection_cache(f"describe failed: {exc}")
         else:
+            lost_probe_error = probe_error
             _reset_connection_cache(f"stale COM proxy: {probe_error}")
+            if _TASK is not None:
+                _mark_instance_lost("probe_failed", probe_error)
         # 继续往下走完整建连（只重试这一次，不会递归）
+    # P0-1：任务活跃时，实例重建必须先把工作副本打开；没有副本就拒绝继续，
+    # 绝不允许在空工程里"继续作图"（2026-10-21 事故的直接根因：
+    # 实例死后 _connect_impl 静默新建 ApplicationCOMSI 空实例，未保存工程全丢）。
+    recovering = None
+    if _TASK is not None:
+        working = _TASK.get("working")
+        if working and os.path.isfile(working):
+            recovering = working
+        else:
+            info = _mark_instance_lost(lost_probe_error or "instance_unreachable")
+            return False, _task_instance_lost_fail(info)
     # 测试/冒烟防污染守卫：必须在 autokill 之前，测试进程永远不会 taskkill 用户 Origin。
     guard = _test_attach_guard()
     if guard is not None:
@@ -806,6 +1046,13 @@ def _connect_impl():
                 "已尝试自动 taskkill 但仍有 Origin64 进程存活（权限不足），"
                 "请手动关闭或用管理员权限重试")
         return False, blocked
+    # 关闭专用实例后不要立刻重建：Origin 2024b 在 Exit 尚未完成时被
+    # ApplicationCOMSI 重建，退出/启动交叠会触发原生崩溃（2026-10-21 16:46
+    # live 验收出现一次 0xC0000005；与 window -r 的 0xC0000374 不同）。
+    if _exclusive_mode() and _LAST_INSTANCE_EXIT_AT is not None:
+        wait = _INSTANCE_EXIT_SETTLE_SECS - (time.time() - _LAST_INSTANCE_EXIT_AT)
+        if wait > 0:
+            time.sleep(wait)
     try:
         import originpro as op
         # 单实例语义加固：originpro 首次访问默认走 Origin.Application（可能启动
@@ -849,6 +1096,35 @@ def _connect_impl():
             "origin_running_before": _origin_running(),
             "detail": "已连接 Origin COM 自动化服务器",
         }
+        if recovering:
+            # P0-1：重建后的实例是空工程，必须先用工作副本恢复任务工程；
+            # 恢复失败则标记 instance_lost 并拒绝，绝不让调用方在空工程里继续。
+            rok, rpages = _open_task_working(op, recovering)
+            _engine_log("task_recover_attempt", task_id=_TASK.get("id"),
+                        working=recovering, ok=bool(rok), pages=rpages,
+                        probe_error=lost_probe_error)
+            if not rok:
+                _mark_instance_lost("reopen_working_failed: %s" % rpages)
+                _reset_connection_cache("task working reopen failed")
+                return False, _task_instance_lost_fail()
+            # P1-3（审查发现）：恢复"成功"但 0 页，视为恢复失败——否则会在
+            # 空工程上继续操作并清掉 instance_lost 标记。
+            if int(_TASK.get("pages_before") or 0) > 0 and (rpages or 0) == 0:
+                _mark_instance_lost(
+                    "reopened_empty_working: pages_before=%s, reopened=0"
+                    % _TASK.get("pages_before"))
+                _reset_connection_cache("reopened empty working")
+                return False, _task_instance_lost_fail()
+            rec = _note_task_recovery(recovering, rpages, lost_probe_error)
+            _engine_log("task_recovered", task_id=_TASK.get("id"),
+                        working=recovering, pages=rpages,
+                        probe_error=lost_probe_error)
+            info["recovered"] = True
+            info["recovered_from"] = recovering
+            info["recovered_pages"] = rpages
+            info["recovery"] = rec
+            info["detail"] = ("Origin 专用实例已重建，并从工作副本恢复任务工程"
+                              "（%s 页）" % (rpages if rpages is not None else "?"))
         if autokill is not None:
             info["autokill"] = autokill
         if nproc and nproc > 1:
@@ -868,7 +1144,7 @@ def _connect_impl():
             str(e) + extra,
             origin_running=_origin_running(),
             next_actions=[
-                "确认已安装 Origin（C:\\Program Files\\OriginLab\\Origin2026b\\Origin64.exe）",
+                "确认已安装 Origin（origin_status.origin_exe 给出实际注册路径）",
                 "确认 Origin 可被脚本启动（首次启动约 5~45 秒）",
                 "Origin 与脚本的运行权限需一致（管理员/普通）",
                 "taskkill /F /IM Origin64.exe 清理残留进程，等 2 秒后重试"
@@ -878,6 +1154,34 @@ def _connect_impl():
         if autokill is not None:
             result["autokill"] = autokill
         return False, result
+
+
+def _origin_exe_path():
+    """探测实际注册的 Origin64.exe 路径（诊断输出用）。
+
+    本机可能只装了 2024b，而代码里曾硬编码 2026b——错误的 origin_exe
+    会误导排障。优先读 COM 注册的 LocalServer32，其次扫描安装目录。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            r"Origin.Application\CLSID") as k:
+            clsid = winreg.QueryValueEx(k, "")[0]
+        key = "CLSID\\" + str(clsid) + "\\LocalServer32"
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, key) as k:
+            raw = str(winreg.QueryValueEx(k, "")[0] or "").strip()
+        if raw:
+            return raw.strip('"').split('"')[0]
+    except Exception:
+        pass
+    try:
+        import glob
+        cands = sorted(glob.glob(r"C:\Program Files\OriginLab\Origin*\Origin64.exe"))
+        if cands:
+            return cands[-1]
+    except Exception:
+        pass
+    return ""
 
 
 def _describe_impl():
@@ -893,7 +1197,7 @@ def _describe_impl():
         "ok": True,
         "connected": bool(_connected and op is not None and path_error is None),
         "user_files": user_files,
-        "origin_exe": "C:\\Program Files\\OriginLab\\Origin2026b\\Origin64.exe",
+        "origin_exe": _origin_exe_path() or "unknown",
         "lock": "专用COM线程(串行)" + (" + 跨进程命名互斥体" if _ipc_lock else ""),
     }
     if path_error:
@@ -1002,6 +1306,9 @@ def _write_data_impl(columns, worksheet=None, book_name=None, sheet_name=None):
         ok, conn = _connect_impl()
         if not ok:
             return conn
+        block = _pending_move_block("write_data")
+        if block:
+            return block
         op = _origin_app
 
         data = _normalize_columns(columns)
@@ -1070,6 +1377,9 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
         ok, conn = _connect_impl()
         if not ok:
             return conn
+        block = _pending_move_block("plot")
+        if block:
+            return block
         op = _origin_app
 
         plot_type = (plot_type or "line").lower()
@@ -1083,6 +1393,11 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                              f"plot_type 必须是 {valid_kinds} 之一，收到 {plot_type!r}",
                              valid_kinds=valid_kinds, received=plot_type)
 
+        # P0-3：同名重建会先删旧图页（结构级操作），重建前保存工作副本。
+        # 只要显式给了 graph_name 就快照一次：find_graph 在本机曾抛 TypeError，
+        # 判定为 None 时 _ensure_graph_name 仍可能走 page -d 兜底删页。
+        if graph_name:
+            _snapshot_before_structural("plot:rebuild:%s" % graph_name)
         # 幂等命名：同名图页先删旧再新建
         lname = _ensure_graph_name(graph_name, title or "")
 
@@ -1113,7 +1428,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                                       columns=["count"], style_mode=style_mode,
                                       family=family, x_title="Bin center",
                                       style_overrides=style_overrides)
-            return {
+            return _plot_success({
                 "ok": True,
                 "graph": short_name,
                 "graph_short": short_name,
@@ -1123,7 +1438,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                 "bins": bins,
                 "style": style,
                 "detail": f"已创建直方图 {short_name}（{bins} 个 bin，{v.size} 点）",
-            }
+            })
 
         # 特殊图型：箱线图 / 条形图（Origin 官方模板，比 plotxy 代码稳定可靠；
         # plotxy 的 204/215 在部分 Origin 2026b 上会渲染成面积图或不出图）
@@ -1145,7 +1460,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                 return oerr.fail("origin_operation_error", f"{plot_type} 图创建失败")
             gl.rescale()
             short_name = gp.obj.GetName()
-            return {
+            return _plot_success({
                 "ok": True,
                 "graph": short_name,
                 "graph_short": short_name,
@@ -1153,7 +1468,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                 "y_columns": [str(col)],
                 "x_column": "auto",
                 "detail": f"已创建图 {short_name}（{PLOT_TYPES_CN.get(plot_type, plot_type)}）",
-            }
+            })
 
         # 主路径：XY 基础图型（line/scatter/line_symbol/column）
         if x_column is None:
@@ -1189,7 +1504,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
                                   columns=plotted, style_mode=style_mode,
                                   family=family, x_title=x_title,
                                   style_overrides=style_overrides)
-        return {
+        return _plot_success({
             "ok": True,
             "graph": short_name,
             "graph_short": short_name,
@@ -1199,7 +1514,7 @@ def _plot_impl(worksheet, y_columns=None, x_column=None, plot_type="line",
             "yerr_column": str(yerr_column) if yerr_column is not None else None,
             "style": style,
             "detail": f"已创建图 {short_name}（{PLOT_TYPES_CN.get(plot_type, plot_type)}，{len(plotted)} 条曲线）",
-        }
+        })
     except Exception as e:
         return oerr.from_exception(e, trace=traceback.format_exc(limit=3))
 
@@ -2424,7 +2739,12 @@ def _labtalk_impl(script, read_expr=None, graph=None, read_kind="auto",
                     next_actions=["按 alternative 里的替代写法改写脚本",
                                   "确知风险仍要执行则带 force_silent=true 重发"],
                     trap=trap[0])
+        block = _pending_move_block("labtalk")
+        if block:
+            return block
         op = _origin_app
+        # P0-3：LabTalk 是逃生舱（可能删页/改结构），执行前先保存工作副本
+        _snapshot_before_structural("labtalk")
         # 阻塞型命令防护（d15 实测：type -b 弹模态对话框把 Origin 卡死 10 分钟，
         # COM 全程无响应，只能 GUI 点击解除）。逃生舱不放火烧船。
         low = str(script).lower()
@@ -3119,6 +3439,27 @@ def _status_impl():
     info["task_active"] = _TASK is not None
     if _TASK is not None:
         info["task_id"] = _TASK.get("id")
+    # P0-1：实例自愈观测（重启次数/原因/最近一次工作副本恢复）
+    pids = sorted(_origin_proc_pids() or set())
+    info["instance"] = {
+        "pid": (pids[0] if len(pids) == 1 else None),
+        "pids": pids,
+        "restarts": int(_CONN_STATS.get("restart_count") or 0),
+        "last_reset_reason": _CONN_STATS.get("last_reset_reason"),
+        "alive": bool(_connected and _origin_app is not None),
+        "session_mode": _session_mode(),
+    }
+    info["restart_count"] = int(_CONN_STATS.get("restart_count") or 0)
+    info["last_reset_reason"] = _CONN_STATS.get("last_reset_reason")
+    info["last_reset_at"] = _CONN_STATS.get("last_reset_at")
+    if _CONN_STATS.get("last_recovery"):
+        info["last_recovery"] = _CONN_STATS["last_recovery"]
+    if _TASK is not None:
+        info["instance_lost"] = _TASK.get("instance_lost")
+        info["last_snapshot"] = _TASK.get("last_snapshot")
+        info["pages_before"] = _TASK.get("pages_before")
+        info["removed_pages"] = list(_TASK.get("removed_pages") or [])
+        info["pending_move"] = bool(_TASK.get("pending_move"))
     try:
         info["capabilities"] = _capabilities_impl()
     except Exception as e:
@@ -3141,6 +3482,14 @@ def _help_impl():
                 "未启用；需要每任务独立工程时设 ORIGIN_SESSION=exclusive 并重启 DSH。"
             ),
         },
+        "tips": [
+            "崩溃/实例异常后先 origin_task_status 看 instance_state 与 snapshot",
+            "task_commit 会拒绝空/退化工程覆盖真 OPJU（task_commit_refused_empty），"
+            "确实要覆盖时再显式 force=True",
+            "exclusive 任务里给图页命名优先 origin_plot(graph_name='...')，"
+            "不要反复用 origin_manage_pages(rename)",
+            "实例丢失时任务状态会带 instance_lost；下次工具调用会自动 op.open(working) 恢复",
+        ],
         "delivery_policy": {
             "mode": "opju_only",
             "rule": "最终交付只保存可编辑 OPJU（origin_save_project）。"
@@ -5307,7 +5656,12 @@ def _edit_page_impl(graph, page_size_cm=None, background=None, layer=None,
         ok, conn = _connect_impl()
         if not ok:
             return conn
+        block = _pending_move_block("edit_page")
+        if block:
+            return block
         import origin_edit as oedit
+        # P0-3：页面/图层几何是结构级改动，改前保存工作副本
+        _snapshot_before_structural("edit_page")
         return oedit.edit_page(_origin_app, _origin_app.po, graph,
                                page_size_cm=page_size_cm, background=background,
                                layer=layer, layer_geometry_pct=layer_geometry_pct)
@@ -5320,9 +5674,23 @@ def _manage_pages_impl(action, pages=None, new_name=None):
         ok, conn = _connect_impl()
         if not ok:
             return conn
+        block = _pending_move_block("manage_pages:%s" % (action or ""))
+        if block:
+            return block
         import origin_edit as oedit
-        return oedit.manage_pages(_origin_app, _origin_app.po, action,
-                                  pages=pages, new_name=new_name)
+        # P0-3：rename/close/closeAll/duplicate 都是结构级操作，先保存工作副本
+        _snapshot_before_structural("manage_pages:%s" % (action or ""))
+        result = oedit.manage_pages(_origin_app, _origin_app.po, action,
+                                    pages=pages, new_name=new_name)
+        # P0-2：记录用户显式删除的页面（commit 退化检测的豁免依据）
+        _track_page_changes(action, result)
+        if (str(action or "").lower() == "closeall"
+                and isinstance(result, dict) and result.get("ok")):
+            note = ("Origin 2024b 关闭全部页面后可能使专用实例进入异常状态；"
+                    "下一次 task_begin 必要时会自动重建实例（真 OPJU 与工作副本不受影响）")
+            result["warning"] = ((result.get("warning") + "；")
+                                 if result.get("warning") else "") + note
+        return result
     except Exception as e:
         return oerr.from_exception(e, trace=traceback.format_exc(limit=3))
 
@@ -5397,13 +5765,24 @@ def _release_impl():
     新线程重连会原生崩溃 EXIT=127）；下次任意工具调用在同一线程重连（Attach）。
     """
     global _connected, _origin_app
+    # P0-3：任务活跃时 release 前先快照——release 后重新建连会重建专用实例，
+    # 没有快照的话未保存改动会随旧实例一起丢掉。
+    snap_warn = None
+    if _TASK is not None:
+        snap_ok, snap_err = _snapshot_working("release")
+        if not snap_ok:
+            snap_warn = ("release 前工作副本快照失败（实例若被关闭，"
+                         "未保存改动可能丢失）: %s" % snap_err)
     origin_still_running = _origin_running()
     _connected = False
     _origin_app = None
-    return {"ok": True, "released": True,
+    info = {"ok": True, "released": True,
             "origin_still_running": origin_still_running,
             "detail": "已释放自动化连接；Origin 窗口保持打开，可手动操作。"
                       "下次任意工具调用将自动重连。"}
+    if snap_warn:
+        info["warning"] = snap_warn
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -5420,26 +5799,34 @@ def _task_dir(task_id, target=None):
     return os.path.join(_task_temp_root(), task_id)
 
 
-def _exit_exclusive_instance():
-    """关闭当前 COMSI 专用实例（不影响用户手动打开的 Origin 窗口）。
+def _exit_exclusive_instance(close=True):
+    """关闭或释放当前 COMSI 专用实例（不影响用户手动打开的 Origin 窗口）。
 
-    返回 None 表示成功；返回错误字符串表示关闭动作失败（但缓存已清）。
+    OriginExt 的 Exit(bReleaseOnly) 语义：
+    - close=True  -> Exit(False)：真正退出 Origin 进程（2024b 在退出阶段
+      随机触发 0xC0000005 崩溃报告，2026-10-21 真机复现）；
+    - close=False -> Exit(True)：只释放 COM 引用，进程保留，下次
+      ApplicationCOMSI 复用（不触发退出崩溃）。
+    返回 None 表示成功；返回错误字符串表示动作失败（但缓存已清）。
     """
-    global _connected, _origin_app
+    global _connected, _origin_app, _LAST_INSTANCE_EXIT_AT
     app = _origin_app
     _connected = False
     _origin_app = None
     err = None
     try:
         from originpro import config as _opconfig
-        _opconfig.po.Exit(False)
+        _opconfig.po.Exit(not close)      # Exit(bReleaseOnly)
     except Exception as exc:  # noqa: BLE001
         err = f"{type(exc).__name__}: {exc}"
         try:
             if app is not None:
-                app.Exit(False)
+                app.Exit(not close)
         except Exception:
             pass
+    finally:
+        if close:
+            _LAST_INSTANCE_EXIT_AT = time.time()
     return err
 
 
@@ -5450,6 +5837,123 @@ def _task_cleanup_dir(path):
             shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
+
+
+def _snapshot_working(reason=""):
+    """P0-3：把任务工作副本存盘（崩溃后可用 op.open(working) 恢复）。
+
+    只在结构级操作之前调用（rename/close/closeAll/duplicate/edit_page/
+    同名重建/labtalk）。返回 (ok, err)；无活跃任务时视为成功（无需快照）。
+    快照失败不阻断操作——warning 由 _SNAPSHOT_WARNINGS 收集后冒泡。
+    """
+    if _TASK is None:
+        return True, None
+    working = _TASK.get("working")
+    if not working:
+        return True, None
+    # P1-1（审查发现）：未连接时 op.save 会懒创建新实例把空工程写成唯一
+    # 恢复副本（release 场景可达）；必须先确认 COM 仍连接着任务工程。
+    if not _connected or _origin_app is None:
+        return False, ("COM 未连接，拒绝写工作副本快照"
+                       "（避免把空工程/新实例写成唯一恢复副本）")
+    try:
+        import originpro as op
+        pages = None
+        try:
+            pages = int(op.po.Pages.Count)
+        except Exception:
+            pages = None
+        prev = _TASK.get("last_snapshot") or {}
+        prev_pages = prev.get("pages")
+        if pages == 0 and isinstance(prev_pages, int) and prev_pages > 0:
+            return False, ("拒绝用空工程覆盖已有快照（当前 0 页 < 上次 %d 页）"
+                           % prev_pages)
+        if not op.save(working):
+            return False, "op.save 返回 False: %s" % working
+        size = os.path.getsize(working) if os.path.isfile(working) else None
+        _TASK["last_snapshot"] = {"at": _now_iso(), "file": working,
+                                  "size": size, "pages": pages,
+                                  "reason": (str(reason) or None)}
+        _TASK["snapshot_count"] = int(_TASK.get("snapshot_count") or 0) + 1
+        return True, None
+    except Exception as exc:  # noqa: BLE001
+        return False, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _snapshot_before_structural(reason):
+    """结构级操作前快照；失败只记 warning（不阻断操作）。"""
+    ok, err = _snapshot_working(reason)
+    if not ok:
+        _SNAPSHOT_WARNINGS.append(
+            "工作副本快照失败（操作已继续，但崩溃可能丢失本次改动）: %s" % err)
+    return ok
+
+
+def _snapshot_after_change(reason):
+    """改动成功后立即保存工作副本（任务模式）；失败只记 warning。
+
+    P0-3 的补充：只在"结构操作前"快照会漏掉新建图页——画完图崩溃时
+    working 仍停在 begin 的空工程。任务隔离模式下每次绘图成功后保存一次，
+    崩溃才真的能恢复到"崩溃前已有的图页"。
+    """
+    if _TASK is None:
+        return
+    ok, err = _snapshot_working(reason)
+    if not ok:
+        _SNAPSHOT_WARNINGS.append(
+            "工作副本快照失败（改动已生效，但崩溃可能丢失）: %s" % err)
+
+
+def _plot_success(info):
+    """绘图成功返回前保存工作副本。"""
+    try:
+        _snapshot_after_change("plot:created")
+    except Exception:
+        pass
+    return info
+
+
+def _with_snapshot(result, reason):
+    """任何"创建/改动图页"的成功返回前保存工作副本（任务模式）。"""
+    if isinstance(result, dict) and result.get("ok"):
+        try:
+            _snapshot_after_change(reason)
+        except Exception:
+            pass
+    return result
+
+
+def _pending_move_block(action=""):
+    """P0-1（审查发现）：上次 commit 的临时工程未落盘且工程恢复失败时，
+    禁止继续改动——此时的改动不会被保存，会形成静默数据丢失。"""
+    if _TASK is None or not _TASK.get("pending_move"):
+        return None
+    return oerr.fail(
+        "task_commit_failed",
+        "上一次 commit 的临时工程尚未落盘（目标文件被占用，工程恢复失败）；"
+        "此时的改动不会被保存，已阻止 %s" % (action or "本次操作"),
+        task_id=_TASK.get("id"), pending_move=True,
+        next_actions=[
+            "关闭占用目标 OPJU 的程序（Office/同步盘/预览器）后 origin_task_commit 重试",
+            "或 origin_task_abort 放弃任务（真 OPJU 不动）",
+        ])
+
+
+def _track_page_changes(action, result):
+    """P0-2：记录用户显式删除的页面，供 commit 的退化检测豁免。"""
+    if _TASK is None or not isinstance(result, dict):
+        return
+    act = str(action or "").lower()
+    removed = []
+    if act == "closeall":
+        removed = list(result.get("removed") or [])
+    elif act == "close":
+        removed = [r.get("page") for r in (result.get("results") or [])
+                   if r.get("status") == "applied" and r.get("page")]
+    removed = [str(p) for p in removed if p]
+    if removed:
+        bucket = _TASK.setdefault("removed_pages", [])
+        bucket.extend(removed)
 
 
 def _task_begin_impl(mode="new", target_path=None, source_path=None):
@@ -5502,22 +6006,60 @@ def _task_begin_impl(mode="new", target_path=None, source_path=None):
             if not op.open(working):
                 raise RuntimeError("op.open 失败: %s" % working)
         else:
-            op.new()
+            try:
+                op.new()
+            except Exception as new_exc:  # noqa: BLE001
+                # 坏实例自愈（2024b 在 closeAll 关闭全部页面后常见：
+                # LT_execute 抛"服务器出现意外情况"）。关闭坏实例并重建一次，
+                # 只重试一次，避免死循环。
+                _reset_connection_cache(
+                    "task_begin op.new failed: %s" % new_exc)
+                try:
+                    _exit_exclusive_instance(close=True)
+                except Exception:
+                    pass
+                ok2, conn2 = _connect_impl()
+                if not ok2:
+                    return conn2
+                import originpro as op2
+                op2.new()
         lp = _list_pages_impl()
+        if not lp.get("ok"):
+            # P2-11（审查发现）：基线不可靠会让 commit 的退化检测失效，
+            # 这里 fail-closed（走 except 清理并返回 task_begin_failed）。
+            raise RuntimeError("无法枚举初始页面（pages_before 基线不可靠）: %s"
+                               % lp.get("error"))
         pages = [p.get("name") for p in (lp.get("pages") or [])
-                 if p.get("name")] if lp.get("ok") else []
+                 if p.get("name")]
         _TASK = {
             "id": task_id, "mode": mode, "target": target, "source": source,
             "dir": tdir, "working": working, "pages_at_begin": pages,
+            # P0-2 退化检测基线；P0-1/P0-3 的观测字段
+            "pages_before": len(pages), "removed_pages": [],
+            "last_snapshot": None, "snapshot_count": 0,
+            "recovery_count": 0, "instance_lost": None,
         }
+        # P0-3：begin 成功后立即初始化工作副本快照（崩溃可救）。
+        # 这里失败必须整体失败——没有快照的任务在实例崩溃后无法恢复，
+        # 留着它只会诱导后续 commit 写空工程。
+        saved = bool(op.save(working))
+        if not saved or not os.path.isfile(working) or os.path.getsize(working) <= 0:
+            raise RuntimeError("工作副本初始化快照失败: %s" % working)
+        _TASK["last_snapshot"] = {"at": _now_iso(), "file": working,
+                                  "size": os.path.getsize(working),
+                                  "pages": len(pages), "reason": "task_begin"}
+        _TASK["snapshot_count"] = 1
         return oerr.ok(
             task_id=task_id, mode=mode, target=target, source=source,
             working_copy=working, pages=pages, pages_count=len(pages),
-            detail=("已开始隔离任务 %s（%s）；作图后用 origin_task_commit"
-                    " 原子落盘到真 OPJU" % (task_id, mode)))
+            snapshot=_TASK["last_snapshot"],
+            detail=("已开始隔离任务 %s（%s）；工作副本快照已初始化，"
+                    "作图后用 origin_task_commit 原子落盘到真 OPJU"
+                    % (task_id, mode)))
     except Exception as exc:  # noqa: BLE001
+        _TASK = None
         try:
-            _exit_exclusive_instance()
+            _exit_exclusive_instance(close=False)
         except Exception:
             pass
         _task_cleanup_dir(tdir)
@@ -5525,9 +6067,20 @@ def _task_begin_impl(mode="new", target_path=None, source_path=None):
                          trace=traceback.format_exc(limit=5))
 
 
-def _task_commit_impl(target_path=None, close_instance=True):
-    """保存临时工程 → 校验 → 原子替换真 OPJU → 关闭实例 + 删除临时文件。"""
+def _task_commit_impl(target_path=None, close_instance=False, force=False):
+    """保存临时工程 → 校验 → 原子替换真 OPJU → 释放 COM 引用 + 删除临时文件。
+
+    close_instance=True 时真正退出 Origin 进程；默认 False 只释放 COM 引用，
+    进程保留供下次任务复用——Origin 2024b 在退出阶段会随机原生崩溃
+    （0xC0000005），默认复用即可避免用户看到崩溃报告。
+
+    P0-2：save 前枚举页面；pages == [] 或页面数比 pages_before 退化且无显式
+    删除记录时拒绝写盘（task_commit_refused_empty），真 OPJU 的 mtime/size
+    不变。force=True 跳过该体检，并在返回体注明"用户显式要求覆盖"。
+    """
     global _TASK
+    close_instance = _coerce_bool(close_instance, default=False)
+    force = _coerce_bool(force, default=False)
     if _TASK is None:
         return oerr.fail("task_not_active", "当前没有进行中的隔离任务")
     task = _TASK
@@ -5547,45 +6100,137 @@ def _task_commit_impl(target_path=None, close_instance=True):
                               task["id"]))
     try:
         import originpro as op
+        forced = False
         # 若上次 commit 已保存、只是在 replace 阶段被文件锁拦住，直接补一次原子移动
         pending = task.get("pending_move")
         if pending:
             tmp_out, target = pending
             os.replace(tmp_out, target)
         else:
+            # P0-2：save 前体检——空工程/退化工程绝不覆盖真 OPJU。
+            # 事故链：实例崩溃 -> 静默重建空实例 -> _TASK 仍在 -> op.save 把空
+            # 工程写成临时文件 -> os.replace 覆盖真 OPJU（数据永久丢失）。
+            lp = _list_pages_impl()
+            if not lp.get("ok"):
+                # 连接/实例问题：commit 中止，不写盘；任务保留可重试/可 abort
+                failure = dict(lp) if lp.get("error_code") else oerr.fail(
+                    "task_commit_failed",
+                    "无法枚举页面，commit 已中止（真 OPJU 未被覆盖）: %s"
+                    % lp.get("error"), task_id=task["id"])
+                failure["task_id"] = task["id"]
+                failure["commit_aborted_before_save"] = True
+                return failure
+            # 页面枚举成功但任务仍带"实例丢失"标记（例如恢复后未清除）：
+            # 不在不可信工程上写盘。
+            if task.get("instance_lost"):
+                return _task_instance_lost_fail(task.get("instance_lost"))
+            pages = [p.get("name") for p in (lp.get("pages") or [])
+                     if p.get("name")]
+            pages_before = int(task.get("pages_before") or 0)
+            removed = list(task.get("removed_pages") or [])
+            # 显式删除过的页面不计入"退化"（用户确实删了东西）
+            expected_min = max(0, pages_before - len(removed))
+            degraded = pages_before > 0 and len(pages) < expected_min
+            if (not pages or degraded) and not force:
+                reason = ("当前工程页面为空（pages=[]）" if not pages else
+                          "页面数从 %d 退化到 %d（无显式删除记录）"
+                          % (pages_before, len(pages)))
+                return oerr.fail(
+                    "task_commit_refused_empty",
+                    "commit 已拒绝：%s；真 OPJU 未被覆盖，任务仍可 abort/重试"
+                    % reason,
+                    task_id=task["id"], pages_before=pages_before,
+                    pages_now=len(pages), pages=pages, degraded=degraded,
+                    removed_pages=removed, forced=False, force_available=True,
+                    next_actions=[
+                        "origin_task_status 复核 pages_before / pages_now",
+                        "要丢弃全部页面：origin_task_abort（真 OPJU 不动）",
+                        "确认要覆盖目标 OPJU：origin_task_commit(force=True)",
+                        "若实例丢失：先调任意工具触发 op.open(working) 恢复",
+                    ])
+            forced = bool(force)
             saved = bool(op.save(tmp_out))
             if not saved or not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) <= 0:
                 raise RuntimeError("op.save 未落盘或文件为空: %s" % tmp_out)
-            lp = _list_pages_impl()
-            pages = [p.get("name") for p in (lp.get("pages") or [])
-                     if p.get("name")] if lp.get("ok") else []
             # os.replace 前先丢弃当前工程：Origin 保存后仍持有 .opju 句柄，
             # 不关闭会报 WinError 32（另一个程序正在使用此文件）。
             try:
                 op.new()
-            except Exception:
-                pass
+            except Exception as new_exc:  # noqa: BLE001
+                # 审查发现 P1-2：op.new 失败时当前工程仍以 tmp_out 为路径
+                # 打开，继续 replace 必然因自占用失败，再走 op.open(tmp_out)
+                # 恢复更会自锁。这里不写替换、保留 pending 并给出真实原因。
+                task["pending_move"] = (tmp_out, target)
+                task["pages_before_close"] = pages
+                return oerr.fail(
+                    "task_commit_failed",
+                    "临时工程已保存，但无法清空当前工程（Origin 实例异常）；"
+                    "真 OPJU 未被覆盖。请 origin_task_abort 后重开任务，"
+                    "或重启 DSH/Origin 后再 commit: %s" % new_exc,
+                    task_id=task["id"], pending_move=True,
+                    saved_tmp=tmp_out,
+                    next_actions=[
+                        "origin_task_abort 放弃任务（真 OPJU 不动）",
+                        "重启 DSH（或手动关闭 Origin）后重试 origin_task_commit",
+                        "不要继续作图：当前任务处于 pending 状态，写操作已被拦截",
+                    ])
             task["pages_before_close"] = pages
             try:
                 os.replace(tmp_out, target)
-            except Exception:
+            except Exception as exc:
+                # P0-1（审查发现）：op.new() 已清空当前工程；replace 失败后若
+                # 继续工作，新页面只会进空工程，下次 commit 的 pending 分支却
+                # 直接替换旧 tmp —— 静默丢弃 replace 失败后的全部工作。
+                # 这里立刻从刚保存的 tmp 恢复工程，任务继续在"tmp 内容"上工作。
+                restored = False
+                try:
+                    restored = bool(op.open(tmp_out))
+                except Exception:
+                    restored = False
+                if restored:
+                    task.pop("pending_move", None)
+                    return oerr.fail(
+                        "task_commit_failed",
+                        "目标文件被占用，原子替换失败；工程已从临时文件恢复"
+                        "（真 OPJU 未被覆盖，继续作图后可重新 commit）: %s" % exc,
+                        task_id=task["id"], recovered_from_tmp=True,
+                        tmp_out=tmp_out,
+                        next_actions=[
+                            "关闭占用目标 OPJU 的程序（Office/同步盘/预览器）",
+                            "origin_task_commit 重试落盘",
+                            "继续作图是安全的：工程内容已从临时文件恢复",
+                        ])
+                # 恢复失败：保留 pending 并禁止继续改动（见 _pending_move_block）
                 task["pending_move"] = (tmp_out, target)
                 raise
         pages = task.get("pages_before_close") or []
         size = os.path.getsize(target)
-        close_err = _exit_exclusive_instance() if close_instance else None
+        # 默认（close_instance=False）保持连接与实例：commit 已 op.new() 清空
+        # 工程，下次 task_begin 直接复用同一连接，既不触发 2024b 退出崩溃，
+        # 也避免 release 后重新 ApplicationCOMSI 拿到坏代理。
+        # close_instance=True 才真正退出 Origin 进程（用户显式要求）。
+        close_err = (_exit_exclusive_instance(close=True)
+                     if close_instance else None)
         _task_cleanup_dir(task["dir"])
         _TASK = None
         info = oerr.ok(
             task_id=task["id"], file=target, size=size,
             pages=pages, pages_count=len(pages),
             instance_closed=bool(close_instance),
+            instance_kept=not bool(close_instance),
             detail=("任务 %s 已落盘 -> %s（%d 页，%d B；%s）"
                     % (task["id"], target, len(pages), size,
-                       "实例已关闭" if close_instance else "实例保留")))
+                       "实例已关闭" if close_instance
+                       else "实例与连接保留，下次任务直接复用")))
+        if forced:
+            info["forced"] = True
+            info["detail"] += ("；页面体检被跳过：用户显式要求覆盖"
+                               "（origin_task_commit force=True）")
         if close_err:
-            info["warning"] = ("真 OPJU 已落盘，但关闭专用实例失败：%s"
-                               "（不影响文件；下次任务会复用/重置实例）" % close_err)
+            warn = ("真 OPJU 已落盘，但关闭专用实例失败：%s"
+                    "（不影响文件；下次任务会复用/重置实例）" % close_err)
+            info["warning"] = ((info.get("warning") + "；" if info.get("warning")
+                                else "") + warn)
         return info
     except Exception as exc:  # noqa: BLE001
         # 如果只是 replace 阶段被锁拦住，保留临时文件供下次 commit 直接补一次移动
@@ -5608,14 +6253,33 @@ def _task_abort_impl():
     if _TASK is None:
         return oerr.ok(aborted=False, detail="没有进行中的隔离任务")
     task = _TASK
-    err = _exit_exclusive_instance()
+    # 保持连接与实例（不 Exit、不 release）：2024b 退出会随机崩，release
+    # 后重新 ApplicationCOMSI 也可能拿到坏代理。abort 丢弃工程用 op.new()
+    # 清空即可，下次 task_begin 复用同一连接。
+    err = None
+    if _connected and _origin_app is not None:
+        try:
+            import originpro as op
+            op.new()
+        except Exception as exc:  # noqa: BLE001
+            err = "%s: %s" % (type(exc).__name__, exc)
+    # P2-3（审查发现）：pending 的临时工程会留在目标目录，abort 时一并清掉
+    pending = task.get("pending_move")
+    if pending:
+        try:
+            tmp = pending[0] if isinstance(pending, (list, tuple)) else pending
+            if isinstance(tmp, str) and os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
     _task_cleanup_dir(task["dir"])
     _TASK = None
     info = oerr.ok(aborted=True, task_id=task["id"],
                    detail="已放弃任务 %s，临时工程已删除，真 OPJU 未改动"
                           % task["id"])
     if err:
-        info["warning"] = "关闭专用实例失败: %s" % err
+        info["warning"] = ("清空工程失败（实例可能不可用）: %s"
+                           "；下次 task_begin 会尝试重建实例" % err)
     return info
 
 
@@ -5626,7 +6290,34 @@ def _task_status_impl():
     lp = _list_pages_impl()
     task["pages"] = [p.get("name") for p in (lp.get("pages") or [])
                      if p.get("name")] if lp.get("ok") else []
+    task["pages_count"] = len(task["pages"])
     task["active"] = True
+    task["pages_ok"] = bool(lp.get("ok"))
+    # P0-1/P0-2/P0-3 观测：实例是否丢失、最近快照、显式删除记录
+    task["instance_lost"] = _TASK.get("instance_lost")
+    task["last_snapshot"] = _TASK.get("last_snapshot")
+    task["removed_pages"] = list(_TASK.get("removed_pages") or [])
+    # P1-3：实例状态与工作副本快照（排障入口）
+    working = _TASK.get("working")
+    snap = None
+    if working and os.path.isfile(working):
+        try:
+            st = os.stat(working)
+            snap = {"path": working, "mtime": st.st_mtime, "size": st.st_size}
+        except Exception:
+            snap = {"path": working, "mtime": None, "size": None}
+    task["snapshot"] = snap
+    if _TASK.get("instance_lost"):
+        task["instance_state"] = "lost"
+    elif _TASK.get("last_recovery"):
+        task["instance_state"] = "recovered"
+    elif _connected and _origin_app is not None:
+        task["instance_state"] = "alive"
+    else:
+        task["instance_state"] = "lost"
+    if not lp.get("ok"):
+        task["pages_error"] = lp.get("error")
+        task["pages_error_code"] = lp.get("error_code")
     return oerr.ok(**task)
 
 
@@ -5659,10 +6350,16 @@ def task_begin(mode="new", target_path=None, source_path=None):
 
 
 @_synchronized
-def task_commit(target_path=None, close_instance=True):
-    """把隔离任务保存为真 OPJU（原子替换）并关闭专用实例。"""
+def task_commit(target_path=None, close_instance=False, force=False):
+    """把隔离任务保存为真 OPJU（原子替换）并释放专用实例的 COM 引用。
+
+    默认 close_instance=False：实例保留供下次复用（Origin 2024b 退出阶段会
+    随机原生崩溃 0xC0000005，复用可避免崩溃报告）。force=False（默认）时
+    拒绝把空/退化工程覆盖到真 OPJU；force=True 需用户显式要求，返回体带
+    forced=true。
+    """
     return _task_commit_impl(target_path=target_path,
-                             close_instance=close_instance)
+                             close_instance=close_instance, force=bool(force))
 
 
 @_synchronized
@@ -5993,8 +6690,13 @@ def fit(worksheet, x_column, y_column, kind="linear", plot_curve=True,
 @_synchronized
 def plot3d(data, plot_type="surface", fmt="png", file_path=None, width=1200,
            output_dir=None, title=None):
-    return _plot3d_impl(data, plot_type=plot_type, fmt=fmt, file_path=file_path,
-                        width=width, output_dir=output_dir, title=title)
+    block = _pending_move_block("plot3d")
+    if block:
+        return block
+    return _with_snapshot(
+        _plot3d_impl(data, plot_type=plot_type, fmt=fmt, file_path=file_path,
+                     width=width, output_dir=output_dir, title=title),
+        "plot3d")
 
 
 @_synchronized
@@ -6045,9 +6747,14 @@ def histogram(worksheet, column=0, bins=10, plot=False, file_path=None,
 @_synchronized
 def plot_contour(data, plot_type="contour", fmt="png", file_path=None, width=1200,
                  output_dir=None, title=None):
-    return _plot_contour_impl(data, plot_type=plot_type, fmt=fmt,
-                              file_path=file_path, width=width,
-                              output_dir=output_dir, title=title)
+    block = _pending_move_block("plot_contour")
+    if block:
+        return block
+    return _with_snapshot(
+        _plot_contour_impl(data, plot_type=plot_type, fmt=fmt,
+                           file_path=file_path, width=width,
+                           output_dir=output_dir, title=title),
+        "plot_contour")
 
 
 @_synchronized
@@ -6224,20 +6931,30 @@ def _plot_template_task(template_id, data, graph_name=None, title=None,
                         style_mode="default", family=None, offset="auto",
                         reverse_x=False, x_title=None, y_title=None,
                         gradient=False):
-    return _plot_template_impl(template_id, data, graph_name=graph_name,
-                               title=title, style_mode=style_mode,
-                               family=family, offset=offset,
-                               reverse_x=reverse_x,
-                               x_title=x_title, y_title=y_title,
-                               gradient=gradient)
+    block = _pending_move_block("plot_template")
+    if block:
+        return block
+    return _with_snapshot(
+        _plot_template_impl(template_id, data, graph_name=graph_name,
+                            title=title, style_mode=style_mode,
+                            family=family, offset=offset,
+                            reverse_x=reverse_x,
+                            x_title=x_title, y_title=y_title,
+                            gradient=gradient),
+        "plot_template")
 
 
 @_synchronized
 def execute_plan(plan_id, fmt=None, file_path=None, graph_name=None, width=1200,
                  expect_hash=None, force=False):
-    return _execute_plan_impl(plan_id, fmt=fmt, file_path=file_path,
-                              graph_name=graph_name, width=width,
-                              expect_hash=expect_hash, force=force)
+    block = _pending_move_block("execute_plan")
+    if block:
+        return block
+    return _with_snapshot(
+        _execute_plan_impl(plan_id, fmt=fmt, file_path=file_path,
+                           graph_name=graph_name, width=width,
+                           expect_hash=expect_hash, force=force),
+        "execute_plan")
 
 
 # ---------------------------------------------------------------------------

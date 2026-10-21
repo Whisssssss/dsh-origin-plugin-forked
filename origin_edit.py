@@ -30,8 +30,30 @@ import origin_errors as oerr
 # ---------------------------------------------------------------------------
 # 基础工具
 # ---------------------------------------------------------------------------
-_PAGE_TYPE = {0: "graph", 1: "matrix", 2: "workbook", 3: "layout", 4: "notes",
-              5: "excel", 6: "other"}
+# Origin 页面 Type 的取值来自 OriginExt 的 ApplicationBase 常量（实测
+# 1.1.15 / OriginExt 1.2.6）：
+#   OPT_NONE=0  OPT_MATRIX=1  OPT_WORKSHEET=2  OPT_GRAPH=3
+#   OPT_LAYOUT=4  OPT_NOTES=5  OPT_EXTERNAL=6  OPT_IMAGE=29
+# 旧表（0:graph, 3:layout …）整体错位——图页被标成 layout，list_pages 的
+# graphs/workbooks 过滤因此长期为空，AI 会误判"没有图页"。
+def _page_type_map():
+    """优先从 OriginExt 读 OPT_* 真值；导入失败时用数字兜底表。"""
+    fallback = {0: "none", 1: "matrix", 2: "worksheet", 3: "graph",
+                4: "layout", 5: "notes", 6: "external", 29: "image"}
+    try:
+        import OriginExt
+        out = {}
+        for attr in ("OPT_NONE", "OPT_MATRIX", "OPT_WORKSHEET", "OPT_GRAPH",
+                     "OPT_LAYOUT", "OPT_NOTES", "OPT_EXTERNAL", "OPT_IMAGE"):
+            v = getattr(OriginExt, attr, None)
+            if isinstance(v, int):
+                out[v] = attr[4:].lower()
+        return out or fallback
+    except Exception:
+        return fallback
+
+
+_PAGE_TYPE = _page_type_map()
 
 
 def _safe(fn, *a, **kw):
@@ -39,6 +61,30 @@ def _safe(fn, *a, **kw):
         return fn(*a, **kw), None
     except Exception as e:  # noqa: BLE001
         return None, f"{type(e).__name__}: {e}"
+
+
+_PAGE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
+_PAGE_NAME_MAX = 40
+
+
+def validate_new_page_name(new_name, existing=None, current=None):
+    """P1-1 前置校验：长度 ≤40、仅 [A-Za-z0-9_-]、不能纯数字、不能与现有短名重复。
+
+    返回错误字符串；None 表示通过。current 是目标页当前短名（同名改名放行）。
+    """
+    name = str(new_name or "")
+    if not name:
+        return "new_name 不能为空"
+    if len(name) > _PAGE_NAME_MAX:
+        return "短名长度不能超过 %d（收到 %d）" % (_PAGE_NAME_MAX, len(name))
+    if not _PAGE_NAME_RE.match(name):
+        return ("短名只能包含字母/数字/下划线/连字符"
+                "（不允许空格、中文、点号等），收到 %r" % name)
+    if name.isdigit():
+        return "短名不能是纯数字（Origin 短名需可被解析为标识符）"
+    if existing and name in existing and name != current:
+        return "短名 %r 已被现有页面占用，请换一个名字" % name
+    return None
 
 
 def _hex_to_rgb(v):
@@ -225,12 +271,19 @@ def list_pages(op, po):
         name, _ = _safe(pg.GetName)
         t, _ = _safe(lambda p=pg: p.Type)
         lname, _ = _safe(lambda p=pg: p.LongName)
-        kind = _PAGE_TYPE.get(int(t) if isinstance(t, (int, float)) else -1, "other")
-        pages.append({"name": str(name), "type": kind,
+        try:
+            tcode = int(t) if isinstance(t, (int, float)) else None
+        except (TypeError, ValueError):
+            tcode = None
+        kind = _PAGE_TYPE.get(tcode, "other")
+        pages.append({"name": str(name), "type": kind, "type_code": tcode,
+                      "type_raw": tcode,
                       "long_name": (str(lname) if lname else None),
                       "is_active": (str(name) == active) if active else None})
     graphs = [p["name"] for p in pages if p["type"] == "graph"]
-    books = [p["name"] for p in pages if p["type"] == "workbook"]
+    # 键名保留 workbooks（历史字段），实际是"工作表页"（Origin 的 worksheet）
+    books = [p["name"] for p in pages
+             if p["type"] in ("worksheet", "workbook")]
     return oerr.ok(pages=pages, count=len(pages), graphs=graphs,
                    workbooks=books, active_window=active,
                    detail=f"共 {len(pages)} 个页面（图页 {len(graphs)}，工作簿 {len(books)}）")
@@ -864,22 +917,79 @@ def manage_pages(op, po, action, pages=None, new_name=None):
         if nm:
             existing.add(str(nm))
 
+    if action == "rename":
+        # P1-1 前置校验（任务要求）：长度/字符集/纯数字/重名先拒绝，避免
+        # 把非法名交给 COM 后得到难以解释的失败，或触发 Origin 自动顺延。
+        bad_name = validate_new_page_name(new_name, existing=existing,
+                                          current=targets[0])
+        if bad_name:
+            return oerr.fail("invalid_request", bad_name,
+                             requested_name=str(new_name),
+                             valid_pattern="[A-Za-z0-9_-]{1,40}",
+                             next_actions=[
+                                 "换一个未占用的短名后重试",
+                                 "exclusive 任务里推荐用 origin_plot(graph_name=...) 命名图页",
+                             ])
+
+    # P1-2（审查发现）：close 通配先按实际匹配页展开，逐页关闭并记账。
+    # 否则删除清单里只有 "Book*" 一项，commit 的退化检测按 1 页记账，
+    # 会把"合法删了多页"误判成退化并拒绝落盘。
+    if action == "close":
+        import fnmatch
+        expanded = []
+        for t in targets:
+            if t.endswith("*"):
+                matched = sorted(n for n in existing if fnmatch.fnmatch(n, t))
+                expanded.extend(matched if matched else [t])
+            else:
+                expanded.append(t)
+        targets = expanded
+
     results = []
     for t in targets:
         wildcard = t.endswith("*")
-        if not wildcard and t not in existing:
+        if wildcard:
+            results.append({"page": t, "status": "rejected",
+                            "reason": "通配未匹配到任何页面（用 origin_list_pages 复核）"})
+            continue
+        if t not in existing:
             results.append({"page": t, "status": "rejected",
                             "reason": "页面不存在（用 origin_list_pages 复核短名）"})
             continue
+        renamed_to = None
+        e = None
         if action == "close":
-            e = lt_exec(po, f"window -c {t};") if wildcard else lt_exec(po, f"window -c {t};")
+            e = lt_exec(po, f"window -c {t};")
         elif action == "activate":
             gp, _ = _safe(op.find_graph, t)
             if gp is not None:
                 _safe(gp.activate)
             e = lt_exec(po, f"win -a {t};")
         elif action == "rename":
-            e = lt_exec(po, f"window -r {t} {new_name};")
+            # P1-1：弃用 window -r。2026-10-21 事故：Origin 2024b (10.1.5.132)
+            # 上 window -r 触发原生堆损坏 0xC0000374 (STATUS_HEAP_CORRUPTION)，
+            # 实例崩溃后未保存工程全部丢失。改走纯 COM：
+            # originpro 的 page.name setter 就是 obj.SetName()，冲突时 Origin
+            # 自动顺延命名（Test -> Test1），不弹窗、不崩溃。
+            # 注意：不要保留 window -r 作为兜底——它正是事故的触发命令。
+            pg, _ = _safe(op.find_graph, t)
+            if pg is not None:
+                try:
+                    pg.name = new_name
+                    renamed_to = str(pg.name)
+                except Exception as exc:  # noqa: BLE001
+                    e = f"{type(exc).__name__}: {exc}"[:200]
+            else:
+                # 非图页（工作簿/矩阵/笔记/布局）同样走 COM Page.SetName
+                com_pg, _ = _safe(lambda n=t: op.po.Pages(n))
+                if com_pg is None:
+                    e = "页面不存在（用 origin_list_pages 复核短名）"
+                else:
+                    try:
+                        com_pg.SetName(new_name)
+                        renamed_to = str(com_pg.GetName())
+                    except Exception as exc:  # noqa: BLE001
+                        e = f"{type(exc).__name__}: {exc}"[:200]
         elif action == "hide":
             e = lt_exec(po, f"window -h 1 {t};")
         elif action == "show":
@@ -893,23 +1003,34 @@ def manage_pages(op, po, action, pages=None, new_name=None):
                 _, e2 = _safe(gp.duplicate)
                 e = None if e2 is None else str(e2)[:120]
         # 复核
-        if action == "close" and not wildcard:
+        if action == "close":
             still, _ = _safe(op.find_graph, t)
             still2, _ = _safe(lambda: t in {str(op.po.Pages(i).GetName())
                                             for i in range(int(op.po.Pages.Count))})
             ok = (still is None) and not still2
         elif action == "rename":
-            still, _ = _safe(op.find_graph, t)
-            new_ok, _ = _safe(op.find_graph, new_name)
-            ok = (new_ok is not None)
+            # 读回即证据：SetName 成功即 applied；actual 可能被 Origin 顺延
+            ok = renamed_to is not None
         elif action == "activate":
             act = lt_str(po, "page.name$")
             ok = act is not None and str(act).strip() == t.strip()
         else:
             ok = (e is None)
+        note = None
+        if e:
+            note = str(e)[:120]
+        elif action == "rename" and renamed_to is not None and renamed_to != new_name:
+            note = "Origin 自动改名为 %r（目标名被占用/顺延）" % (renamed_to,)
+        elif not ok:
+            note = "复核未通过"
         results.append({"page": t,
                         "status": "applied" if (e is None and ok) else "rejected",
-                        "note": (str(e)[:120] if e else (None if ok else "复核未通过"))})
+                        "note": note,
+                        "renamed_to": renamed_to if action == "rename" else None,
+                        "actual_name": renamed_to if action == "rename" else None,
+                        "renamed_exact": ((renamed_to == new_name)
+                                          if action == "rename" else None),
+                        "requested_name": new_name if action == "rename" else None})
     applied = sum(1 for r in results if r["status"] == "applied")
     return oerr.ok(action=action, results=results, n_applied=applied,
                    detail=f"{action}: {applied}/{len(results)} 成功")

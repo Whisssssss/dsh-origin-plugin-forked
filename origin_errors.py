@@ -232,6 +232,20 @@ CODE_META: Dict[str, tuple] = {
         ["确认 target_path 目录可写、磁盘空间足够；真 OPJU 在成功前不会被覆盖",
          "修复后重试 origin_task_commit，或 origin_task_abort 放弃"],
     ),
+    "task_instance_lost": (
+        True,
+        ["Origin 专用实例已丢失：任务工程不再可信，禁止在空工程里继续作图",
+         "若工作副本仍在：再次调用任意工具会自动 op.open(working) 恢复"
+         "（origin_task_status 查看 instance_lost / last_snapshot）",
+         "若恢复失败：origin_task_abort 放弃任务，再 origin_task_begin"
+         "(mode='open', source_path=原.opju) 重新开始"],
+    ),
+    "task_commit_refused_empty": (
+        True,
+        ["commit 已拒绝写盘：真 OPJU 未被覆盖（mtime/size 不变）",
+         "确认页面是否被意外清空：origin_task_status 对比 pages_before / pages_now",
+         "要丢弃全部页面时用 origin_task_abort；确实要覆盖时显式传 force=True（慎用）"],
+    ),
 }
 
 VALID_CODES = frozenset(CODE_META)
@@ -378,6 +392,17 @@ RECOVERY_MAP: Dict[str, Dict[str, Any]] = {
     "task_commit_failed": {
         "policy": RECOVERY_POLICY_FIX,
         "diagnose": ["检查目标目录写权限与磁盘空间", "origin_task_abort"],
+    },
+    "task_instance_lost": {
+        "policy": RECOVERY_POLICY_RESTART,
+        "diagnose": ["origin_task_status",
+                     "再次调用任意工具触发 op.open(working) 自动恢复",
+                     "origin_diagnose 确认 Origin64 进程状态"],
+    },
+    "task_commit_refused_empty": {
+        "policy": RECOVERY_POLICY_FIX,
+        "diagnose": ["origin_task_status",
+                     "origin_task_abort 放弃，或显式 force=True 覆盖"],
     },
     "insufficient_data": {
         "policy": RECOVERY_POLICY_FIX,
