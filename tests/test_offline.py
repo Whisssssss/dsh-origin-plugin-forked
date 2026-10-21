@@ -267,3 +267,44 @@ def test_shutdown_without_thread_does_not_poison_com_queue():
     eng.shutdown()
     assert eng._run_on_com_thread(lambda: 42) == 42
     eng.shutdown()
+
+# ---------------------------------------------------------------------------
+# 任务加固（P0/P1）离线回归
+# ---------------------------------------------------------------------------
+def test_page_type_map_matches_origin_ext():
+    import origin_edit as oedit
+    # OriginExt: OPT_NONE=0 OPT_MATRIX=1 OPT_WORKSHEET=2 OPT_GRAPH=3
+    #            OPT_LAYOUT=4 OPT_NOTES=5 OPT_EXTERNAL=6 OPT_IMAGE=29
+    assert oedit._PAGE_TYPE[1] == "matrix"
+    assert oedit._PAGE_TYPE[2] == "worksheet"
+    assert oedit._PAGE_TYPE[3] == "graph"
+    assert oedit._PAGE_TYPE[4] == "layout"
+    assert oedit._PAGE_TYPE[5] == "notes"
+
+
+def test_rename_name_validation():
+    import origin_edit as oedit
+    assert oedit.validate_new_page_name("Graph_1") is None
+    assert oedit.validate_new_page_name("x" * 41) is not None
+    assert oedit.validate_new_page_name("bad name") is not None
+    assert oedit.validate_new_page_name("123") is not None
+    assert oedit.validate_new_page_name("Taken", existing={"Taken"}) is not None
+    assert oedit.validate_new_page_name("Graph1", existing={"Graph1"},
+                                        current="Graph1") is None
+
+
+def test_task_commit_refuses_empty_before_save(monkeypatch, tmp_path):
+    import origin_engine as eng
+    monkeypatch.delenv("DSH_ORIGIN_ALLOWED_ROOTS", raising=False)
+    target = tmp_path / "figure.opju"
+    target.write_bytes(b"ORIGINAL")
+    task = {"id": "t1", "target": str(target), "dir": str(tmp_path),
+            "working": str(tmp_path / "working.opju"), "pages_before": 2,
+            "removed_pages": [], "last_snapshot": None, "snapshot_count": 0,
+            "recovery_count": 0, "instance_lost": None}
+    monkeypatch.setattr(eng, "_TASK", task, raising=False)
+    monkeypatch.setattr(eng, "_list_pages_impl",
+                        lambda: {"ok": True, "pages": []})
+    r = eng._task_commit_impl()
+    assert r["error_code"] == "task_commit_refused_empty"
+    assert target.read_bytes() == b"ORIGINAL"

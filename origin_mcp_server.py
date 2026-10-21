@@ -606,15 +606,42 @@ def origin_task_begin(mode: str = "new", target_path: str = "",
                              source_path=source_path or None)
 
 
+def _as_bool(value, default=False):
+    """宽松解析布尔入参（MCP 客户端可能把 false 传成字符串 "false"/"0"）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 @mcp.tool()
 def origin_task_commit(target_path: str = "",
-                       close_instance: bool = True) -> dict:
-    """把隔离任务保存为真 OPJU：临时文件校验后原子替换，并关闭专用实例。
+                       close_instance: bool = False,
+                       force: bool = False) -> dict:
+    """把隔离任务保存为真 OPJU：临时文件校验后原子替换，并释放 COM 引用。
+
+    默认 close_instance=False：专用实例保留供下次任务复用（Origin 2024b 在
+    真正退出时可能弹崩溃报告，复用可避免；数据早已落盘，不受影响）。
+    传 close_instance=true 才真正退出 Origin 进程。
 
     真 OPJU 只有在 os.replace 成功那一刻才更新；失败时保留任务以便重试。
+    安全闸（P0-2）：save 前枚举页面，若 pages == [] 或页面数比任务开始时
+    退化且无显式删除记录，直接返回 task_commit_refused_empty，**不写盘、
+    不替换**（目标 OPJU 的 mtime/size 不变）。确实要覆盖时显式传 force=True，
+    返回体会带 forced=true。
     """
     return engine.task_commit(target_path=target_path or None,
-                              close_instance=close_instance)
+                              close_instance=_as_bool(close_instance,
+                                                      default=False),
+                              force=_as_bool(force))
 
 
 @mcp.tool()
@@ -1226,6 +1253,10 @@ def origin_manage_pages(action: str, pages: list = None, new_name: str = "") -> 
     """窗口管理：关闭 / 激活 / 重命名 / 隐藏 / 显示 / 复制页面（含工作簿与图页）。
 
     典型用法："把多余的两个空工作簿关掉" → action='close', pages=['Book3','Book4']。
+
+    提示：exclusive 任务里给图页命名优先用 origin_plot(graph_name="...")；
+    rename 仅用于改已有页，会校验短名（≤40、仅 [A-Za-z0-9_-]、非纯数字、不重名），
+    重名会被直接拒绝而不是让 Origin 自动顺延。
 
     Args:
         action: close | closeAll | activate | rename | hide | show | duplicate

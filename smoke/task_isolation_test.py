@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 os.environ["ORIGIN_SESSION"] = "exclusive"
 os.environ["DSH_ORIGIN_AUTOKILL"] = "0"
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import origin_engine as engine  # noqa: E402
 
 TARGET = os.path.join(tempfile.gettempdir(), "dsh_task_isolation_smoke.opju")
+CRASH_TARGET = os.path.join(tempfile.gettempdir(), "dsh_task_crash_smoke.opju")
 
 
 def _clean():
@@ -31,7 +33,7 @@ def _clean():
         engine.shutdown()
     except Exception:
         pass
-    for p in (TARGET,):
+    for p in (TARGET, CRASH_TARGET):
         try:
             if os.path.exists(p):
                 os.remove(p)
@@ -87,7 +89,9 @@ def main():
         check("task_commit ok", commit.get("ok"), commit)
         check("target OPJU written", os.path.isfile(TARGET) and os.path.getsize(TARGET) > 0,
               TARGET)
-        check("commit closes instance", commit.get("instance_closed") is True, commit)
+        check("commit keeps instance by default",
+              commit.get("instance_kept") is True and commit.get("instance_closed") is False,
+              commit)
         check("commit reports pages", (commit.get("pages_count") or 0) >= 2,
               commit.get("pages"))
 
@@ -98,6 +102,39 @@ def main():
         aborted = engine.task_abort()
         check("task_abort ok", aborted.get("ok") and aborted.get("aborted"),
               aborted)
+
+        # ---- P0-1/P0-3 回归：建图 → 快照 → kill 专用实例 → 自动恢复 → commit ----
+        try:
+            if os.path.exists(CRASH_TARGET):
+                os.remove(CRASH_TARGET)
+        except Exception:
+            pass
+        b2 = engine.task_begin(mode="new", target_path=CRASH_TARGET)
+        check("crash drill begin ok", b2.get("ok"), b2)
+        w2 = engine.write_data({"x": [1, 2, 3], "y": [2, 4, 6]})
+        check("crash drill write ok", w2.get("ok"), w2)
+        gp2 = engine.plot(w2["worksheet"], plot_type="line")
+        check("crash drill plot ok", gp2.get("ok"), gp2)
+        graph2 = gp2.get("graph")
+        st = engine.task_status()
+        check("crash drill snapshot exists", bool(st.get("snapshot")),
+              st.get("snapshot"))
+        live = engine._origin_proc_pids() & set(engine._TEST_STARTED_ORIGIN_PIDS)
+        check("crash drill locate test instance", bool(live), sorted(live))
+        for pid in sorted(live):
+            os.popen("taskkill /F /PID %d /T >nul 2>&1" % pid).read()
+        time.sleep(2.0)
+        st2 = engine.task_status()          # 下一次调用应自动重建 + op.open(working)
+        check("crash drill instance recovered",
+              st2.get("instance_state") == "recovered",
+              st2.get("instance_state"))
+        check("crash drill pages restored", graph2 in (st2.get("pages") or []),
+              {"expect": graph2, "pages": st2.get("pages")})
+        c2 = engine.task_commit()
+        check("crash drill commit ok", c2.get("ok"), c2)
+        check("crash drill target written",
+              os.path.isfile(CRASH_TARGET) and os.path.getsize(CRASH_TARGET) > 0,
+              CRASH_TARGET)
     finally:
         _clean()
 
