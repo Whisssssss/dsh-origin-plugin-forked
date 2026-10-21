@@ -198,9 +198,12 @@ def verify_graph(op, po, graph, expected=None, files=None):
         else:
             add(f"axis_{ax}_title", "pass", f"{ax} 轴标题={t!r}", value=t)
 
-    # --- 轴标题字号：COM 作用域属性（窗口无关），比 LabTalk xb.fsize 可靠 ---
+    # --- 刻度标签字号：COM 作用域属性（窗口无关） ---
+    # 注意：originpro/Origin COM 没有可靠的轴标题字号读取通道
+    # （x.title.font / x.title.fsize 实测恒为 0，LabTalk 读回 NaN），
+    # 因此检查项命名为 label（刻度标签），不再冒称 title（历史 bug：issue 2026-10）。
     min_pt = expected.get("min_font_pt")
-    for ax, label in (("x", "x_title_font_pt"), ("y", "y_title_font_pt")):
+    for ax, label in (("x", "x_label_font_pt"), ("y", "y_label_font_pt")):
         v = None
         if gl0 is not None:
             try:
@@ -211,11 +214,12 @@ def verify_graph(op, po, graph, expected=None, files=None):
             add(label, "unreadable",
                 f"gl.get_int('{ax}.label.fsize') 不可读（版本差异，可忽略）")
         elif min_pt is not None and float(v) < float(min_pt):
-            add(label, "fail", f"字号 {v}pt 低于要求 {min_pt}pt",
+            add(label, "fail", f"刻度标签字号 {v}pt 低于要求 {min_pt}pt",
                 value=v, min_required=min_pt)
         else:
             add(label, "pass",
-                f"字号 {v}pt" + (f"（要求 >= {min_pt}pt）" if min_pt else ""), value=v)
+                f"刻度标签字号 {v}pt" + (f"（要求 >= {min_pt}pt）" if min_pt else ""),
+                value=v)
 
     # --- 图层几何：COM 作用域读写（窗口无关；单位见 layer.unit） ---
     unit_label = {1: "%page", 2: "inch", 3: "cm", 4: "mm", 5: "pixel", 6: "point"}

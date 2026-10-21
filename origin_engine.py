@@ -68,6 +68,7 @@ _com_thread = None                # 专用 COM 线程
 _ipc_lock = None                  # 可选跨进程锁（Windows 命名互斥体）
 _origin_app = None                # 惰性连接的 originpro 句柄（仅 COM 线程访问）
 _connected = False
+_TASK = None                      # 当前隔离任务（exclusive 模式；见 task_begin/commit）
 
 # 画图类型 -> originpro add_plot type 参数（2D 基础）
 PLOT_TYPES = {
@@ -615,6 +616,16 @@ def _origin_proc_count():
         return None
 
 
+def _session_mode():
+    """当前 Origin 会话模式：attach（默认）/ isolated / exclusive。"""
+    return (os.environ.get("ORIGIN_SESSION", "attach") or "attach").strip().lower()
+
+
+def _exclusive_mode():
+    """是否使用 COM 专用实例（COMSI）+ 任务级工程隔离。"""
+    return _session_mode() in ("exclusive", "task", "comsi")
+
+
 def _origin_proc_pids():
     """返回当前 Origin64.exe 的 PID 集合（测试隔离清理用）。"""
     pids = set()
@@ -657,8 +668,10 @@ def _test_attach_guard():
         return None
     if not _running_under_tests():
         return None
-    if os.environ.get("ORIGIN_SESSION", "attach").strip().lower() == "isolated":
-        if not (os.environ.get("DSH_ORIGIN_AUTOKILL") or "").strip():
+    mode = _session_mode()
+    if mode in ("isolated", "exclusive", "task", "comsi"):
+        # isolated 不允许 autokill（会杀用户 Origin）；exclusive 用 COMSI 专用实例，更不该杀
+        if mode == "isolated" and not (os.environ.get("DSH_ORIGIN_AUTOKILL") or "").strip():
             os.environ["DSH_ORIGIN_AUTOKILL"] = "0"
         return None
     return oerr.fail(
@@ -736,10 +749,48 @@ def _kill_residual_origin(wait_seconds=2.0):
     return info
 
 
+def _probe_connection():
+    """轻量 COM 活性探测：能调通 op.path() 才算连接还活着。
+
+    2026-10 修复（真机 issue）：MCP server 长驻，Origin 进程退出后
+    _connected/_origin_app 仍是旧值；旧代码命中缓存直接返回 True，
+    下一次 COM 调用才在 _describe_impl 里炸出 RPC_E_DISCONNECTED。
+    """
+    op = _origin_app
+    if op is None:
+        return False, "no_app"
+    try:
+        op.path()
+        return True, None
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _reset_connection_cache(reason=""):
+    """丢弃已失效的 COM 缓存（下次调用走完整建连）。"""
+    global _connected, _origin_app
+    _connected = False
+    _origin_app = None
+    if reason:
+        try:
+            sys.stderr.write("[origin_engine] connection cache reset: %s\n" % reason)
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
 def _connect_impl():
     global _connected, _origin_app
     if _connected and _origin_app is not None:
-        return True, _describe_impl()
+        alive, probe_error = _probe_connection()
+        if alive:
+            try:
+                return True, _describe_impl()
+            except Exception as exc:  # noqa: BLE001
+                _reset_connection_cache(f"describe failed: {exc}")
+        else:
+            _reset_connection_cache(f"stale COM proxy: {probe_error}")
+        # 继续往下走完整建连（只重试这一次，不会递归）
     # 测试/冒烟防污染守卫：必须在 autokill 之前，测试进程永远不会 taskkill 用户 Origin。
     guard = _test_attach_guard()
     if guard is not None:
@@ -762,7 +813,22 @@ def _connect_impl():
         # 强制 Attach（OriginExt.ApplicationSI）复用已运行的 Origin 主实例。
         try:
             from originpro import config as _opconfig
-            _opconfig.po.Attach()
+            if _exclusive_mode():
+                # 任务隔离：新建/复用 COM 专用实例（ApplicationCOMSI），
+                # 不附着用户手动打开的 Origin（SI），并保持隐藏。
+                import OriginExt
+                try:
+                    _opconfig.po.Exit(True)     # 释放旧绑定
+                except Exception:
+                    pass
+                _capp = OriginExt.ApplicationCOMSI()
+                try:
+                    _capp.PutVisible(0)
+                except Exception:
+                    pass
+                _opconfig.po._app = _capp
+            else:
+                _opconfig.po.Attach()
         except Exception:
             pass
         started = time.time()
@@ -816,13 +882,22 @@ def _connect_impl():
 
 def _describe_impl():
     op = _origin_app
+    user_files = None
+    path_error = None
+    if op is not None:
+        try:
+            user_files = op.path()
+        except Exception as exc:  # noqa: BLE001
+            path_error = f"{type(exc).__name__}: {exc}"
     info = {
         "ok": True,
-        "connected": _connected,
-        "user_files": op.path() if op else None,
+        "connected": bool(_connected and op is not None and path_error is None),
+        "user_files": user_files,
         "origin_exe": "C:\\Program Files\\OriginLab\\Origin2026b\\Origin64.exe",
         "lock": "专用COM线程(串行)" + (" + 跨进程命名互斥体" if _ipc_lock else ""),
     }
+    if path_error:
+        info["user_files_error"] = path_error
     return info
 
 
@@ -3039,6 +3114,11 @@ def _status_impl():
     info["templates"] = {k: v["desc"] for k, v in PLOT_TEMPLATES.items()}
     info["default_output_dir"] = DEFAULT_OUTPUT_DIR
     info["python"] = sys.executable
+    info["session_mode"] = _session_mode()
+    info["task_isolation"] = _exclusive_mode()
+    info["task_active"] = _TASK is not None
+    if _TASK is not None:
+        info["task_id"] = _TASK.get("id")
     try:
         info["capabilities"] = _capabilities_impl()
     except Exception as e:
@@ -3050,6 +3130,17 @@ def _help_impl():
     """快速使用速查（不连接 Origin，秒回）。模型画图前调用一次即可上手。"""
     return {
         "ok": True,
+        "session": {
+            "mode": _session_mode(),
+            "task_isolation": _exclusive_mode(),
+            "task_flow": (
+                "先 origin_task_begin(mode='new', target_path=工作区真.opju) 或 "
+                "(mode='open', target_path=原.opju)；作图/分析；最后 "
+                "origin_task_commit(target_path=同一路径) 原子落盘并关闭专用实例。"
+                if _exclusive_mode() else
+                "未启用；需要每任务独立工程时设 ORIGIN_SESSION=exclusive 并重启 DSH。"
+            ),
+        },
         "delivery_policy": {
             "mode": "opju_only",
             "rule": "最终交付只保存可编辑 OPJU（origin_save_project）。"
@@ -3081,6 +3172,10 @@ def _help_impl():
             "origin_plot_template": "领域模板：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel",
             "origin_verify_graph": "确定性反读核验（轴标题/字号/图层几何/图例/文件完整性），与 view_graph 互补",
             "origin_save_project": "保存当前项目为可编辑 OPJU（默认最终交付物）",
+            "origin_task_begin": "开始隔离任务（COMSI 专用实例 + 临时工程；exclusive 模式）",
+            "origin_task_commit": "任务落盘为真 OPJU（原子替换）并关闭专用实例",
+            "origin_task_abort": "放弃任务、关闭实例、删除临时工程（真 OPJU 不动）",
+            "origin_task_status": "查看当前隔离任务与页面清单",
             "origin_export_delivery": "一键交付目录（图片+OPJU；仅在用户明确要图片时用）",
             "origin_filter_data": "删点/裁剪（drop_rows 索引 或 x_min/x_max）",
             "origin_fit": "拟合 kind=linear 或 Origin 函数名(ExpDec1/Gauss/Polynomial/...)，拟合曲线上图",
@@ -3314,6 +3409,13 @@ def _apply_style_impl(graph, plot_type=None, columns=None, style_mode="default",
         col_names = columns or [f"S{i+1}" for i in range(n)]
         style_plan = pst.full_style_plan(plot_type or "line", col_names, rows_est,
                                          style_mode=style_mode, family=family)
+        if not columns:
+            # 未提供列名时不要用图内默认序列名（S1/S2…）覆盖用户已有的语义标题。
+            # 旧行为：applied_ops 里谎报 y.title='S1'（无 readback，实际没生效/或误伤标题）。
+            style_plan["axis_titles"] = {
+                "x": None, "y": None,
+                "reason": "columns 未提供：跳过轴标题推断，保留图中现有标题",
+            }
 
         applied_ops = []
         do_color = (n > 1) or bool(style_mode) or bool(family)
@@ -3342,24 +3444,33 @@ def _apply_style_impl(graph, plot_type=None, columns=None, style_mode="default",
                 except Exception:
                     pass
 
-        # 轴标题：用 GLayer.axis('x'/'y').title（真机验证可靠）
+        # 轴标题：写后必须读回验证（旧实现直接赋值就写 applied_ops，实测会假成功）
+        import origin_edit as _oedit
+        import originpro as _op
+        title_warnings = []
         y_title = None
-        if apply_axis_titles and isinstance(style_plan["axis_titles"].get("y"), dict):
+        if apply_axis_titles and columns and isinstance(style_plan["axis_titles"].get("y"), dict):
             y_title = style_plan["axis_titles"]["y"].get("title")
         if y_title:
-            try:
-                gl.axis("y").title = str(y_title)
+            res = _oedit.set_axis_title_checked(gl, "y", str(y_title),
+                                                po=_op.po, graph=graph)
+            if res.get("ok"):
                 applied_ops.append(f"y.title={y_title!r}")
-            except Exception:
-                pass
+            else:
+                title_warnings.append(
+                    f"y.title 未生效（读回 {res.get('readback')!r}，通道 {res.get('channel')}）")
         if x_title:
-            try:
-                gl.axis("x").title = str(x_title)
+            res = _oedit.set_axis_title_checked(gl, "x", str(x_title),
+                                                po=_op.po, graph=graph)
+            if res.get("ok"):
                 applied_ops.append(f"x.title={x_title!r}")
-            except Exception:
-                pass
+            else:
+                title_warnings.append(
+                    f"x.title 未生效（读回 {res.get('readback')!r}，通道 {res.get('channel')}）")
 
         style_plan["applied"] = applied_ops
+        if title_warnings:
+            style_plan["title_warnings"] = title_warnings
         style_decisions = _apply_style_overrides(gl, plots, graph, style_overrides)
         return oerr.ok(applied=True, applied_ops=applied_ops, style_plan=style_plan,
                        style_decisions=style_decisions)
@@ -3672,9 +3783,25 @@ def _diagnose_impl(connect_probe=False):
     if com_ok is False:
         recs.append("Origin COM 组件未注册：重装/修复 Origin，或以管理员运行一次 Origin")
 
-    # 4) 引擎连接状态（不主动连接）
-    checks["engine_connected"] = {"connected": bool(_connected and _origin_app),
-                                  "com_thread_alive": bool(_com_thread and _com_thread.is_alive())}
+    # 4) 引擎连接状态：缓存标志 + 一次轻量 COM 探活（不启动 Origin）
+    cached = bool(_connected and _origin_app)
+    probe_ok = False
+    probe_error = "no_app" if not cached else None
+    if cached:
+        try:
+            if _com_thread is not None and threading.current_thread() is _com_thread:
+                probe_ok, probe_error = _probe_connection()
+            else:
+                probe_ok, probe_error = _run_on_com_thread(_probe_connection)
+        except Exception as exc:  # noqa: BLE001
+            probe_ok, probe_error = False, f"{type(exc).__name__}: {exc}"
+    checks["engine_connected"] = {
+        "connected": bool(probe_ok),
+        "cached_connected": cached,
+        "stale_cache": bool(cached and not probe_ok),
+        "probe_error": None if probe_ok else probe_error,
+        "com_thread_alive": bool(_com_thread and _com_thread.is_alive()),
+    }
     checks["env_policy"] = {
         "ORIGIN_SESSION": os.environ.get("ORIGIN_SESSION", "attach（默认）"),
         "DSH_ORIGIN_AUTOKILL": os.environ.get("DSH_ORIGIN_AUTOKILL") or "未设置",
@@ -5237,12 +5364,27 @@ def shutdown(timeout=5.0):
             pending[3].set_exception(RuntimeError("引擎停机：任务未执行"))
         except Exception:
             pass
-    _com_queue.put(None)
+    # 关键：没有存活线程时不要投递哨兵。否则哨兵会留在全局队列里，
+    # 下一次 _run_on_com_thread 启动的新线程会先吃掉哨兵并直接退出，
+    # 导致首个调用等到 watchdog 超时（真机冒烟实测 105s 假死）。
     t, _com_thread = _com_thread, None
     stopped = True
     if t is not None and t.is_alive() and t is not threading.current_thread():
+        _com_queue.put(None)
         t.join(timeout=max(0.1, float(timeout)))
         stopped = not t.is_alive()
+    else:
+        # 清掉可能残留的哨兵，避免下一次启动线程立即退出
+        while True:
+            try:
+                item = _com_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                continue
+            # 理论上有任务不应在无线程时排队；放回去以免丢失
+            _com_queue.put(item)
+            break
     return {"ok": True, "thread_stopped": stopped}
 
 
@@ -5264,6 +5406,230 @@ def _release_impl():
                       "下次任意工具调用将自动重连。"}
 
 
+# ---------------------------------------------------------------------------
+# 任务隔离（ORIGIN_SESSION=exclusive）：COMSI 专用实例 + 每任务临时工程
+# ---------------------------------------------------------------------------
+def _task_temp_root():
+    return os.path.join(tempfile.gettempdir(), "dsh-origin-tasks")
+
+
+def _task_dir(task_id, target=None):
+    if target:
+        base = os.path.dirname(os.path.abspath(target)) or "."
+        return os.path.join(base, f".dsh-origin-task-{task_id}")
+    return os.path.join(_task_temp_root(), task_id)
+
+
+def _exit_exclusive_instance():
+    """关闭当前 COMSI 专用实例（不影响用户手动打开的 Origin 窗口）。
+
+    返回 None 表示成功；返回错误字符串表示关闭动作失败（但缓存已清）。
+    """
+    global _connected, _origin_app
+    app = _origin_app
+    _connected = False
+    _origin_app = None
+    err = None
+    try:
+        from originpro import config as _opconfig
+        _opconfig.po.Exit(False)
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+        try:
+            if app is not None:
+                app.Exit(False)
+        except Exception:
+            pass
+    return err
+
+
+def _task_cleanup_dir(path):
+    try:
+        import shutil
+        if path and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _task_begin_impl(mode="new", target_path=None, source_path=None):
+    """开始隔离任务：在 COMSI 专用实例里建临时工程，最后原子落盘到真 OPJU。"""
+    global _TASK
+    if not _exclusive_mode():
+        return oerr.fail(
+            "task_isolation_unavailable",
+            "任务隔离需要 ORIGIN_SESSION=exclusive（COM 专用实例），当前模式: %s"
+            % _session_mode(),
+            session_mode=_session_mode(),
+            next_actions=["在 profile 的 mcp-origin env 里设 ORIGIN_SESSION=exclusive 后重启 DSH",
+                          "或继续用 attach/isolated + 普通工具（不启用每任务工程）"])
+    if _TASK is not None:
+        return oerr.fail("task_busy", "已有隔离任务未结束",
+                         task_id=_TASK.get("id"), next_actions=[
+                             "origin_task_commit(target_path=...)",
+                             "origin_task_abort()"])
+    mode = (mode or "new").strip().lower()
+    if mode not in ("new", "open"):
+        return oerr.fail("invalid_request", "mode 只能是 new 或 open")
+    target = os.path.abspath(str(target_path)) if target_path else None
+    source = os.path.abspath(str(source_path)) if source_path else (
+        target if mode == "open" else None)
+    if target is not None:
+        g = _path_guard(target, "任务目标路径")
+        if g is not None:
+            return g
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    if source is not None:
+        g = _path_guard(source, "任务源路径")
+        if g is not None:
+            return g
+    if mode == "open":
+        if not source or not os.path.isfile(source):
+            return oerr.fail("invalid_request",
+                             "mode=open 需要存在的 source_path（或 target_path）")
+    ok, conn = _connect_impl()
+    if not ok:
+        return conn
+    task_id = uuid.uuid4().hex[:8]
+    tdir = _task_dir(task_id, target)
+    working = os.path.join(tdir, "working.opju")
+    try:
+        os.makedirs(tdir, exist_ok=True)
+        import originpro as op
+        if mode == "open":
+            import shutil
+            shutil.copy2(source, working)
+            if not op.open(working):
+                raise RuntimeError("op.open 失败: %s" % working)
+        else:
+            op.new()
+        lp = _list_pages_impl()
+        pages = [p.get("name") for p in (lp.get("pages") or [])
+                 if p.get("name")] if lp.get("ok") else []
+        _TASK = {
+            "id": task_id, "mode": mode, "target": target, "source": source,
+            "dir": tdir, "working": working, "pages_at_begin": pages,
+        }
+        return oerr.ok(
+            task_id=task_id, mode=mode, target=target, source=source,
+            working_copy=working, pages=pages, pages_count=len(pages),
+            detail=("已开始隔离任务 %s（%s）；作图后用 origin_task_commit"
+                    " 原子落盘到真 OPJU" % (task_id, mode)))
+    except Exception as exc:  # noqa: BLE001
+        try:
+            _exit_exclusive_instance()
+        except Exception:
+            pass
+        _task_cleanup_dir(tdir)
+        return oerr.fail("task_begin_failed", "任务初始化失败: %s" % exc,
+                         trace=traceback.format_exc(limit=5))
+
+
+def _task_commit_impl(target_path=None, close_instance=True):
+    """保存临时工程 → 校验 → 原子替换真 OPJU → 关闭实例 + 删除临时文件。"""
+    global _TASK
+    if _TASK is None:
+        return oerr.fail("task_not_active", "当前没有进行中的隔离任务")
+    task = _TASK
+    target = os.path.abspath(str(target_path)) if target_path else task.get("target")
+    if not target:
+        return oerr.fail("invalid_request",
+                         "缺少 target_path（开始任务时未提供 target_path）")
+    g = _path_guard(target, "任务目标路径")
+    if g is not None:
+        return g
+    if not target.lower().endswith((".opju", ".opj", ".ogg")):
+        target += ".opju"
+    target_dir = os.path.dirname(target) or "."
+    os.makedirs(target_dir, exist_ok=True)
+    tmp_out = os.path.join(target_dir, ".%s.dsh-task-%s.tmp.opju"
+                           % (os.path.splitext(os.path.basename(target))[0],
+                              task["id"]))
+    try:
+        import originpro as op
+        # 若上次 commit 已保存、只是在 replace 阶段被文件锁拦住，直接补一次原子移动
+        pending = task.get("pending_move")
+        if pending:
+            tmp_out, target = pending
+            os.replace(tmp_out, target)
+        else:
+            saved = bool(op.save(tmp_out))
+            if not saved or not os.path.isfile(tmp_out) or os.path.getsize(tmp_out) <= 0:
+                raise RuntimeError("op.save 未落盘或文件为空: %s" % tmp_out)
+            lp = _list_pages_impl()
+            pages = [p.get("name") for p in (lp.get("pages") or [])
+                     if p.get("name")] if lp.get("ok") else []
+            # os.replace 前先丢弃当前工程：Origin 保存后仍持有 .opju 句柄，
+            # 不关闭会报 WinError 32（另一个程序正在使用此文件）。
+            try:
+                op.new()
+            except Exception:
+                pass
+            task["pages_before_close"] = pages
+            try:
+                os.replace(tmp_out, target)
+            except Exception:
+                task["pending_move"] = (tmp_out, target)
+                raise
+        pages = task.get("pages_before_close") or []
+        size = os.path.getsize(target)
+        close_err = _exit_exclusive_instance() if close_instance else None
+        _task_cleanup_dir(task["dir"])
+        _TASK = None
+        info = oerr.ok(
+            task_id=task["id"], file=target, size=size,
+            pages=pages, pages_count=len(pages),
+            instance_closed=bool(close_instance),
+            detail=("任务 %s 已落盘 -> %s（%d 页，%d B；%s）"
+                    % (task["id"], target, len(pages), size,
+                       "实例已关闭" if close_instance else "实例保留")))
+        if close_err:
+            info["warning"] = ("真 OPJU 已落盘，但关闭专用实例失败：%s"
+                               "（不影响文件；下次任务会复用/重置实例）" % close_err)
+        return info
+    except Exception as exc:  # noqa: BLE001
+        # 如果只是 replace 阶段被锁拦住，保留临时文件供下次 commit 直接补一次移动
+        if not task.get("pending_move"):
+            try:
+                if os.path.isfile(tmp_out):
+                    os.remove(tmp_out)
+            except Exception:
+                pass
+        # 保留 _TASK，允许重试 commit 或 abort
+        return oerr.fail("task_commit_failed",
+                         "任务提交失败（真 OPJU 未被覆盖）: %s" % exc,
+                         trace=traceback.format_exc(limit=5),
+                         task_id=task["id"])
+
+
+def _task_abort_impl():
+    """放弃当前任务：关闭专用实例、删除临时工程（真 OPJU 不动）。"""
+    global _TASK
+    if _TASK is None:
+        return oerr.ok(aborted=False, detail="没有进行中的隔离任务")
+    task = _TASK
+    err = _exit_exclusive_instance()
+    _task_cleanup_dir(task["dir"])
+    _TASK = None
+    info = oerr.ok(aborted=True, task_id=task["id"],
+                   detail="已放弃任务 %s，临时工程已删除，真 OPJU 未改动"
+                          % task["id"])
+    if err:
+        info["warning"] = "关闭专用实例失败: %s" % err
+    return info
+
+
+def _task_status_impl():
+    if _TASK is None:
+        return oerr.ok(active=False, detail="当前没有隔离任务")
+    task = dict(_TASK)
+    lp = _list_pages_impl()
+    task["pages"] = [p.get("name") for p in (lp.get("pages") or [])
+                     if p.get("name")] if lp.get("ok") else []
+    task["active"] = True
+    return oerr.ok(**task)
+
+
 def _reconnect_impl():
     """显式重连 Origin（release 后恢复自动化；幂等——已连接时原样返回状态）。"""
     ok, conn = _connect_impl()
@@ -5283,6 +5649,32 @@ def status():
 def release():
     """P0-3：释放自动化连接（Origin 保持打开，交给用户手动操作）。"""
     return _release_impl()
+
+
+@_synchronized
+def task_begin(mode="new", target_path=None, source_path=None):
+    """任务隔离（ORIGIN_SESSION=exclusive）：建临时工程，最后原子落盘真 OPJU。"""
+    return _task_begin_impl(mode=mode, target_path=target_path,
+                            source_path=source_path)
+
+
+@_synchronized
+def task_commit(target_path=None, close_instance=True):
+    """把隔离任务保存为真 OPJU（原子替换）并关闭专用实例。"""
+    return _task_commit_impl(target_path=target_path,
+                             close_instance=close_instance)
+
+
+@_synchronized
+def task_abort():
+    """放弃隔离任务（真 OPJU 不动，关闭实例并删临时工程）。"""
+    return _task_abort_impl()
+
+
+@_synchronized
+def task_status():
+    """查看当前隔离任务状态与页面清单。"""
+    return _task_status_impl()
 
 
 @_synchronized

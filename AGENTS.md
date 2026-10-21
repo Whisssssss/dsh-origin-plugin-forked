@@ -34,6 +34,10 @@
 9. **最终交付只给 OPJU 源文件**：默认只调 `origin_save_project(path)`，回复里给 OPJU 路径；
    **不要主动导出图片/PPT/交付目录**——图片由用户自行导出。自检用 `origin_view_graph`
    （内联，不落盘）或 `origin_verify_graph`（读回，不落盘）。只有用户明确要图片时才导出。
+10. **任务隔离模式（`ORIGIN_SESSION=exclusive`）**：`origin_help.session.task_isolation=true` 时，
+    先 `origin_task_begin`、结束 `origin_task_commit`（原子落盘并关专用实例），改图用
+    `mode="open"`；放弃用 `origin_task_abort`。**不要**在该模式下直接 `origin_save_project`，
+    也不要并发开两个任务。
 
 ---
 

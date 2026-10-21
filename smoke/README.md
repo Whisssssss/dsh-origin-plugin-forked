@@ -17,6 +17,8 @@ python smoke/advanced_test.py
   不会动你手动打开的实例。
 - 导出默认落到 `%TEMP%\dsh-origin-tests\output`；要固定目录可设 `DSH_ORIGIN_OUTPUT_DIR`。
 - 真机 pytest 还要额外设 `DSH_ORIGIN_LIVE_TESTS=1`（见 `tests/test_live.py` 文件头）。
+- 任务隔离冒烟（COMSI 专用实例，不需要关闭你自己的 Origin）：
+  `python smoke/task_isolation_test.py`（脚本内部设 `ORIGIN_SESSION=exclusive`）。
 
 ## 不要做的事
 

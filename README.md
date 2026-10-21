@@ -270,6 +270,39 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 - 若命令不出现或工具缺失，先看 [COMPATIBILITY.md](COMPATIBILITY.md) §7：DSH 0.2.x
   必须搭配同号的 `@deepseek-ai/dsh-mcp-client`，否则 `mcp-origin` 整行会被运行时禁用。
 
+### 3.2 任务隔离模式 `ORIGIN_SESSION=exclusive`（v2.9.0+）
+
+**解决的问题**：默认 attach 模式所有任务共用一个 Origin 实例/工程，页面会混在一起，
+`save_project` 也会把别的页面一起存走。`exclusive` 模式改为：
+
+- 用 **`OriginExt.ApplicationCOMSI()`（COM 专用实例，隐藏）**，不附着用户手动打开的 Origin；
+- 每个任务一个临时工程（新图 `op.new()`；改图把真 OPJU 复制到临时目录后 `op.open()`）；
+- 结束用**临时文件 + `os.replace` 原子写回真 OPJU**，再 `Exit(False)` 关闭专用实例、删除临时文件；
+- 失败/中断真 OPJU 不会被半写。
+
+启用（profile 的 `mcp-origin` env）：
+
+```yaml
+    env:
+      ORIGIN_SESSION: exclusive
+```
+
+工具链路（模型侧）：
+
+```text
+origin_task_begin(mode="new", target_path="D:/work/fig.opju")
+  → origin_load_file / origin_write_data → origin_plot / origin_edit_*
+  → origin_verify_graph（读回）/ origin_view_graph（内联，不落盘）
+  → origin_task_commit(target_path="D:/work/fig.opju")
+改已有图：origin_task_begin(mode="open", target_path="D:/work/fig.opju") → … → commit
+放弃：origin_task_abort()
+```
+
+- 每任务新建专用实例约 **2.7–4 秒**；若想更快，可保持实例常驻（只做每任务的 `new/open`），
+  但此时进程不会关闭，页面隔离仍有效。
+- 不支持旧版 DSH？无影响：该模式只影响 MCP server 的 Origin 连接方式。
+- 任务隔离和 `origin_save_project` 不冲突：任务模式请用 `origin_task_commit`（原子落盘并关实例）。
+
 ### 4. 对话触发示例
 
 | 你说 | 模型会调用 |
@@ -328,8 +361,12 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 | `origin_plot_plan` | **绘图计划**（离线：逐列画像+角色建议+待确认问题） | `columns`, `plot_type` |
 | `origin_execute_plan` | **执行计划**（按 plan_id 写数→画图→导出） | `plan_id` |
 | `origin_plot_template` | **领域模板**：stacked_spectra/xrd_pattern/dual_y/forest/multi_panel | `template_id`, `data` |
-| `origin_verify_graph` | **确定性反读**（轴标题/字号/几何/图例/文件完整性） | `graph`, `expected_*` |
+| `origin_verify_graph` | **确定性反读**（轴标题/刻度标签字号/几何/图例/文件完整性） | `graph`, `expected_*` |
 | `origin_save_project` | **保存可编辑 OPJU 工程（默认交付物）** | `path` |
+| `origin_task_begin` | **开始隔离任务**（COMSI 专用实例 + 临时工程；exclusive 模式） | `mode`, `target_path`, `source_path` |
+| `origin_task_commit` | 任务落盘为真 OPJU（原子替换）并关闭专用实例 | `target_path`, `close_instance` |
+| `origin_task_abort` | 放弃隔离任务（真 OPJU 不动） | 无 |
+| `origin_task_status` | 查看当前隔离任务与页面清单 | 无 |
 | `origin_export_delivery` | 一键交付目录（图片+OPJU+核验；**仅用户明确要图片时**） | `graph`, `source_path`, `fmts` |
 | `origin_list_pages` | **列出全部页面**（图页/工作簿）+ 活动窗口 | 无 |
 | `origin_inspect_graph` | **巡检现状**：图层几何/曲线样式/轴/图例/页面尺寸 | `graph` |

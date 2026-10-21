@@ -208,6 +208,30 @@ CODE_META: Dict[str, tuple] = {
          "关闭 Origin 后设 ORIGIN_SESSION=isolated 重跑；或显式 DSH_ORIGIN_ALLOW_ATTACH_TESTS=1",
          "正常 MCP 作图任务不受影响（只有 tests/ 与 smoke/ 脚本触发）"],
     ),
+    "task_isolation_unavailable": (
+        False,
+        ["任务隔离需要专用 COM 实例：设 ORIGIN_SESSION=exclusive 后重启 MCP server",
+         "普通会话可继续用 attach/isolated 模式，不影响现有工具"],
+    ),
+    "task_busy": (
+        False,
+        ["已有隔离任务未结束；先调用 origin_task_commit 或 origin_task_abort",
+         "不要并发开两个任务（同一专用实例无法承载两个工程）"],
+    ),
+    "task_not_active": (
+        True,
+        ["当前没有进行中的隔离任务；先 origin_task_begin"],
+    ),
+    "task_begin_failed": (
+        True,
+        ["检查 source_path 是否存在、模式是否为 new/open",
+         "查看 trace 与 origin_task_abort 清理残留"],
+    ),
+    "task_commit_failed": (
+        True,
+        ["确认 target_path 目录可写、磁盘空间足够；真 OPJU 在成功前不会被覆盖",
+         "修复后重试 origin_task_commit，或 origin_task_abort 放弃"],
+    ),
 }
 
 VALID_CODES = frozenset(CODE_META)
@@ -333,6 +357,27 @@ RECOVERY_MAP: Dict[str, Dict[str, Any]] = {
         "diagnose": ["确认当前是测试/冒烟脚本（tests/ 或 smoke/）",
                      "关闭 Origin 后改用 ORIGIN_SESSION=isolated 重跑",
                      "人工补救：origin_pages_gc(baseline=[...]) 只删新增页"],
+    },
+    "task_isolation_unavailable": {
+        "policy": RECOVERY_POLICY_NO,
+        "diagnose": ["设置 ORIGIN_SESSION=exclusive 并重启 MCP server",
+                     "origin_help 查看 session.task_isolation"],
+    },
+    "task_busy": {
+        "policy": RECOVERY_POLICY_NO,
+        "diagnose": ["origin_task_commit(target_path=...) 或 origin_task_abort"],
+    },
+    "task_not_active": {
+        "policy": RECOVERY_POLICY_FIX,
+        "diagnose": ["origin_task_begin(mode='new'|'open', ...)"],
+    },
+    "task_begin_failed": {
+        "policy": RECOVERY_POLICY_FIX,
+        "diagnose": ["检查 source_path/target_path", "origin_task_abort 清理"],
+    },
+    "task_commit_failed": {
+        "policy": RECOVERY_POLICY_FIX,
+        "diagnose": ["检查目标目录写权限与磁盘空间", "origin_task_abort"],
     },
     "insufficient_data": {
         "policy": RECOVERY_POLICY_FIX,

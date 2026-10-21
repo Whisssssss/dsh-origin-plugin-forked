@@ -39,6 +39,21 @@ whenToUse: 用户要求用 Origin 画图、导入数据、拟合/FFT/统计分�
 [7] 交付：只 save_project（OPJU）→ 回复路径 + verify 结论（不导出图片）
 ```
 
+## 任务隔离模式（ORIGIN_SESSION=exclusive，v2.9.0+）
+
+`origin_help.session.task_isolation = true` 时，按任务而不是按页面工作：
+
+1. 新任务 → `origin_task_begin(mode="new", target_path="<工作区真.opju>")`；
+   改已有图 → `origin_task_begin(mode="open", target_path="<原.opju>")`；
+2. 正常 `origin_load_file/origin_write_data → origin_plot/origin_edit_* → origin_verify_graph`；
+3. 结束 → `origin_task_commit(target_path="<同一路径>")`：临时文件校验后**原子替换**真 OPJU，
+   并关闭 COMSI 专用实例；
+4. 放弃 → `origin_task_abort()`（真 OPJU 不动，删除临时工程）。
+
+- 任务模式下**不要**直接 `origin_save_project`（会绕过原子落盘/实例关闭）；
+- 不要并发开两个任务（同一专用实例无法承载两个工程）；
+- 每个任务新建实例约 2.7–4 秒；页面不会跨任务混在一起，也不会写进用户手动打开的 Origin。
+
 ## STEP 0 铁律（每条都对应实测过的返工，违反必出错）
 1. **写后必读返回**：所有编辑工具逐项返回 status，必须逐项看（判读见 4B）。
 2. **改图前必 inspect**：曲线索引/图层号/页面短名以 `origin_inspect_graph`/`origin_list_pages` 读到的为准，不要猜。

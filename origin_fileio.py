@@ -57,12 +57,60 @@ def _try_float(cell):
 
 
 def _decode_bytes(raw: bytes):
-    """多编码探测解码：utf-8-sig → gbk → utf-16 → latin-1(兜底替换)。"""
-    for enc in ("utf-8-sig", "gbk", "utf-16"):
+    """多编码探测解码：BOM/utf-8 → (gbk | cp1252) → utf-16 → latin-1 兜底。
+
+    2026-10 修复（真机 issue）：Origin 导出的 txt 常带单字节 latin-1/cp1252 字符
+    （例如 "Lamp,µF" 里的 0xB5）。旧实现先试 gbk，而 B5 46 恰好是合法 GBK 双字节，
+    于是把 µF 解成 "礔" 并谎报 encoding="gbk"。现在：
+      - 先认 BOM（UTF-16/UTF-8）；
+      - 纯 ASCII/UTF-8 直接通过；
+      - 少量高位字节（<=2）且 GBK 解出 CJK 时，优先按 cp1252/latin-1 解；
+      - 中文 GBK 文件（大量 CJK / 高位字节）仍走 gbk。
+    """
+    # 1) 明确 BOM 优先（否则 utf-16 的零字节会被 gbk 误判）
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
         try:
-            return raw.decode(enc), enc
+            return raw.decode("utf-16"), "utf-16"
+        except (UnicodeDecodeError, UnicodeError):
+            pass
+    if raw.startswith(b"\xef\xbb\xbf"):
+        try:
+            return raw.decode("utf-8-sig"), "utf-8-sig"
+        except (UnicodeDecodeError, UnicodeError):
+            pass
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except (UnicodeDecodeError, UnicodeError):
+        pass
+
+    # 2) gbk vs cp1252 判别
+    gbk_text = None
+    try:
+        gbk_text = raw.decode("gbk")
+    except (UnicodeDecodeError, UnicodeError):
+        gbk_text = None
+    cp_text = None
+    for enc in ("cp1252", "latin-1"):
+        try:
+            cp_text = raw.decode(enc)
+            cp_enc = enc
+            break
         except (UnicodeDecodeError, UnicodeError):
             continue
+    if gbk_text is not None:
+        high = sum(1 for b in raw if b >= 0x80)
+        cjk = sum(1 for ch in gbk_text if "\u4e00" <= ch <= "\u9fff")
+        # 典型 case：整份文件只有 1~2 个高位字节，GBK 却把它解成汉字 → 多半是 µ/°/± 等
+        if cp_text is not None and high <= 2 and cjk > 0:
+            return cp_text, cp_enc
+        return gbk_text, "gbk"
+    if cp_text is not None:
+        return cp_text, cp_enc
+    # 最后才尝试无 BOM 的 utf-16（仅当 gbk/cp1252 都失败，避免把中文 GBK 误判成 utf-16）
+    try:
+        return raw.decode("utf-16"), "utf-16"
+    except (UnicodeDecodeError, UnicodeError):
+        pass
     return raw.decode("latin-1", errors="replace"), "latin-1(replace)"
 
 

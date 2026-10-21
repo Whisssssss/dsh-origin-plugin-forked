@@ -77,6 +77,7 @@ export function buildOriginCommandPrompt(rawInput, attachments) {
     '2) 主路径：origin_write_data / origin_load_file → origin_plot（只建图，不导出文件）。',
     '3) 自检用 origin_verify_graph（读回）或 origin_view_graph（内联预览，不落盘）。',
     '4) 最终交付只保存 OPJU：origin_save_project(path)。不要导出图片/PPT/交付目录（图片由用户自行导出）；只有用户明确要图片时才用 origin_export / origin_export_delivery。',
+    '5) 若 origin_help 的 session.task_isolation 为 true（ORIGIN_SESSION=exclusive）：先 origin_task_begin(mode="new", target_path=<工作区真.opju>) 开始任务；改已有图用 mode="open", target_path=原.opju。作图/分析结束后用 origin_task_commit(target_path=同一路径) 原子落盘并关闭专用实例，不要直接 origin_save_project。',
     '约束：只使用真实数据，不虚构或补造数值；首次连接 Origin 可能耗时 5~45 秒。',
   ].join('\n')
   const extra = []
