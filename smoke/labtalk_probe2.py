@@ -15,7 +15,7 @@ labtalk_probe2 —— 细粒度编辑能力真机探针（只读优先，写入�
 - 页面对象（page.width/height/resx/resy）+ GPage.set_int 写入与读回
 
 用法（需 Origin 运行）:
-    <venv python> -X utf8 smoke\labtalk_probe2.py [输出json路径]
+    <venv python> -X utf8 smoke\\labtalk_probe2.py [输出json路径]
 """
 from __future__ import annotations
 
@@ -227,12 +227,14 @@ def main():
     gone, _ = safe(op.find_graph, tmp_name)
     rec("write", "window -c (close page)", {"err": str(e)[:60] if e else None,
                                             "still_exists": gone is not None})
-    # 重命名
+    # 重命名（2026-10-21 事故后改走 COM：window -r 在 Origin 2024b 上会触发
+    # ntdll 堆损坏 0xC0000374，禁止再用于任何探针/生产路径）
     rn_gp = op.new_graph(lname="ProbeRename")
     rn_name = rn_gp.obj.GetName()
-    r, e = safe(po.LT_execute, f"window -r {rn_name} ProbeRenamed;")
-    rec("write", "window -r (rename)", {"err": str(e)[:60] if e else None,
-                                        "find_new": safe(op.find_graph, "ProbeRenamed")[0] is not None})
+    rn_gp.name = "ProbeRenamed"          # originpro page.name setter == SetName()
+    rec("write", "page.name (COM rename)", {
+        "actual": str(rn_gp.name),
+        "find_new": safe(op.find_graph, "ProbeRenamed")[0] is not None})
     # 激活
     r, e = safe(po.LT_execute, f"win -a {short};")
     rec("write", "win -a (activate)", "ok" if e is None else str(e)[:60])
