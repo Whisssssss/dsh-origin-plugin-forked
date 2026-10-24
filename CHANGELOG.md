@@ -1,3 +1,29 @@
+## 2.9.1 (2026-10-24) — 修复非 web profile 下 MCP server 永不启动
+
+### 修复
+- **bundle patch 不再写死 `profiles/web`**：`cordis.patch.yml` 的 server 路径与 `cwd`
+  改为按 loader 的 `ctx.baseUrl`（当前 profile 目录）相对推导为
+  `<profile>/node_modules/dsh-origin-plugin/origin_mcp_server.py`。此前 DSH 0.2.x 的
+  `desktop` / `headless` / 自定义 profile 下 python 直接
+  `can't open file ... origin_mcp_server.py`，而 `failOnStartupError: false` 让失败
+  静默——症状是"插件已安装、但一个 `origin_*` 工具都没有"（真实会话复盘确认）。
+  新增 `DSH_ORIGIN_SERVER` 环境变量，用于插件不装在 `<profile>/node_modules` 时兜底。
+- **`register_to_dsh.ps1` / `unregister_from_dsh.ps1` 自动探测 profile**：在
+  `%USERPROFILE%\.dsh\profiles\*` 与 `%APPDATA%\dsh-desktop\harness\profiles\*`
+  下寻找已安装本插件的 profile，不再假设叫 `web`；多个命中时用 `-ProfileName` 指定。
+  注册块补上 `cwd`（与 bundle 层一致）。
+- 文档同步（README / COMPATIBILITY）：不再要求用户把 `/profiles/web/` 手工替换成自己的
+  profile 名；注册目标改为"脚本自动探测到的 profile"。
+
+### 验证
+- 用 DSH 0.2.1-rc.2 的 entry-list 方言在临时 profile 上跑
+  `dsh --profile test --dump-config`：新 `!!js` 表达式被完整解析、结构正确。
+- 用本机 cordis loader 的 `evaluate`，以 `profiles/web/` 为 `ctx.baseUrl` 求值，
+  得到真实存在的 `origin_mcp_server.py` 路径；desktop/headless 只会因该机未安装插件
+  而路径不存在（符合预期）。
+- PowerShell 语法检查通过；注册/卸载脚本在沙盒 `USERPROFILE` 下执行通过（写入、
+  幂等跳过、段落移除均正确）。
+
 ## 2.9.0 (2026-10-21) — 任务隔离模式 + 会话健壮性修复
 
 ### 新增：任务隔离（`ORIGIN_SESSION=exclusive`）
