@@ -115,11 +115,11 @@ is incompatible with dsh 0.2.1-alpha.5: requirements {"@deepseek-ai/dsh-attachme
 # 1) 看当前运行时版本
 dsh --version                       # 例：0.2.1-alpha.5
 
-# 2) 在 profile 里装同版本 mcp-client（例：0.2.1-alpha.5）
-dsh plugin --profile web add @deepseek-ai/dsh-mcp-client@0.2.1-alpha.5
+# 2) 在 profile 里装同版本 mcp-client（例：0.2.1-alpha.5；<profile> 换成你的：web / desktop / …）
+dsh plugin --profile <profile> add @deepseek-ai/dsh-mcp-client@0.2.1-alpha.5
 
 # 3) 确认包完整（必须有 lib/index.js）且版本正确
-node -p "require('C:/Users/<你>/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-mcp-client/package.json').version"
+node -p "require('C:/Users/<你>/.dsh/profiles/<profile>/node_modules/@deepseek-ai/dsh-mcp-client/package.json').version"
 
 # 4) 重启 DSH（兼容门禁只在启动时评估；热重载不会补挂从未加载过的行）
 ```

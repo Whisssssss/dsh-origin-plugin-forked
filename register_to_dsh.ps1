@@ -1,8 +1,9 @@
-# register_to_dsh.ps1
-# 把 Origin 画图插件注册到 DSH（v2.0.4 同步传输版）：
+﻿# register_to_dsh.ps1
+# 把 Origin 画图插件注册到 DSH（v2.9.1 起自动探测 profile）：
 #   1) MCP 插件条目写入 profile patch（幂等，自动备份）
 #   2) origin-plotting skill 安装到 DSH skill 根目录（幂等）
 # 用法:  powershell -ExecutionPolicy Bypass -File register_to_dsh.ps1
+#        可选：-ProfileName desktop（多个 profile 都装了插件时显式指定）
 # 卸载:  运行 unregister_from_dsh.ps1，或手动删除 cordis.patch.yml 中
 #         "# --- dsh-origin-plugin" 到 "# --- end dsh-origin-plugin" 段。
 # 注意:  必须用 UTF-8 编码写回（本脚本用 .NET WriteAllText，避免编码损坏）。
@@ -13,21 +14,82 @@
 #   旧版完整 insert 与 bundle 层撞成两条 mcp-origin 会触发 DSH 启动失败：
 #   duplicate loader entry id: mcp-origin。已在此版本彻底移除该风险。
 # v2.0.4：args 加 -u + env 加 PYTHONUNBUFFERED=1（配合同步传输，双重 flush 保险）；
-#   修正路径：venv 在 %USERPROFILE%\dsh_origin_plugin\.venv（非 dsch_）；
-#   server 指向已安装 bundle 的 node_modules 路径；profile patch 路径改为
-#   %USERPROFILE%\.dsh\profiles\web\cordis.patch.yml（当前 DSH Desktop 布局）。
+#   修正路径：venv 在 %USERPROFILE%\dsh_origin_plugin\.venv（非 dsch_）。
+# v2.9.1：不再假设 profile 叫 web。脚本自动在
+#   %USERPROFILE%\.dsh\profiles\* 与 %APPDATA%\dsh-desktop\harness\profiles\*
+#   下寻找已安装 dsh-origin-plugin 的 profile（DSH 0.2.x 的 desktop/headless/
+#   自定义 profile 名都支持）；多个命中时用 -ProfileName 指定。
+
+param(
+    [string]$ProfileName = ""
+)
 
 $ErrorActionPreference = "Stop"
 
 $dshHome      = Join-Path $env:USERPROFILE ".dsh"
-$profilePatch  = Join-Path $dshHome "profiles\web\cordis.patch.yml"
-$venvPython    = Join-Path $env:USERPROFILE "dsh_origin_plugin\.venv\Scripts\python.exe"
-$serverScript  = Join-Path $dshHome "profiles\web\node_modules\dsh-origin-plugin\origin_mcp_server.py"
-$skillFile     = Join-Path $dshHome "profiles\web\node_modules\dsh-origin-plugin\skills\origin-plotting\SKILL.md"
+$profileRoots = @(
+    (Join-Path $dshHome "profiles"),
+    (Join-Path $env:APPDATA "dsh-desktop\harness\profiles")
+)
+$venvPython   = Join-Path $env:USERPROFILE "dsh_origin_plugin\.venv\Scripts\python.exe"
+$skillRoot    = Join-Path $dshHome "skills"
 
 if (-not (Test-Path $venvPython)) { throw "未找到 $venvPython —— 请先创建 venv 并安装依赖（见 README）" }
-if (-not (Test-Path $serverScript)) { throw "未找到 $serverScript —— 请先在 DSH 插件市场安装 dsh-origin-plugin" }
-if (-not (Test-Path $profilePatch)) { throw "未找到 profile patch: $profilePatch" }
+
+# ---------- 0) 探测已安装本插件的 profile ----------
+function Find-OriginProfiles {
+    $found = @()
+    foreach ($root in $profileRoots) {
+        if (-not (Test-Path $root)) { continue }
+        Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $pkgDir   = Join-Path $_.FullName "node_modules\dsh-origin-plugin"
+            $serverPy = Join-Path $pkgDir "origin_mcp_server.py"
+            if (-not (Test-Path $serverPy)) { return }
+            $patchFile = Join-Path $_.FullName "cordis.patch.yml"
+            $hasPatch  = Test-Path $patchFile
+            $patchTime = if ($hasPatch) { (Get-Item $patchFile).LastWriteTime } else { [datetime]::MinValue }
+            $found += [pscustomobject]@{
+                Name      = $_.Name
+                Dir       = $_.FullName
+                Server    = $serverPy
+                Patch     = $patchFile
+                HasPatch  = $hasPatch
+                PatchTime = $patchTime
+                Skill     = Join-Path $pkgDir "skills\origin-plotting\SKILL.md"
+            }
+        }
+    }
+    return $found
+}
+
+$candidates = @(Find-OriginProfiles)
+
+if ($ProfileName) {
+    $candidates = @($candidates | Where-Object { $_.Name -eq $ProfileName })
+    if ($candidates.Count -eq 0) {
+        throw "profile '$ProfileName' 下没有安装 dsh-origin-plugin（缺少 node_modules\dsh-origin-plugin\origin_mcp_server.py）。请先在该 profile 安装插件，或去掉 -ProfileName 让脚本自动探测。"
+    }
+} elseif ($candidates.Count -eq 0) {
+    throw "没有找到已安装 dsh-origin-plugin 的 profile（已搜索：$($profileRoots -join '；')）。请先在 DSH 插件市场安装本插件，或用 -ProfileName 指定 profile。"
+} elseif ($candidates.Count -gt 1) {
+    # 多个 profile 都装了：若恰好只有一个已有 cordis.patch.yml，就选它；否则要求显式指定
+    $withPatch = @($candidates | Where-Object { $_.HasPatch })
+    if ($withPatch.Count -eq 1) {
+        $candidates = $withPatch
+    } else {
+        $names = ($candidates | ForEach-Object { $_.Name }) -join "、"
+        throw "多个 profile 都安装了本插件（$names）。请用 -ProfileName <名字> 明确指定要注册到哪一个。"
+    }
+}
+
+$target       = $candidates[0]
+$profilePatch = $target.Patch
+$serverScript = $target.Server
+$skillFile    = $target.Skill
+
+Write-Host "目标 profile: $($target.Name)  ($($target.Dir))"
+
+if (-not (Test-Path $profilePatch)) { throw "未找到 profile patch: $profilePatch（该 profile 是否已启动过 DSH？）" }
 if (-not (Test-Path $skillFile)) { throw "未找到 skill 文件: $skillFile（bundle 是否完整安装？）" }
 
 # ---------- 1) MCP 插件条目（幂等；config-only 覆盖，避免 duplicate id） ----------
@@ -52,6 +114,7 @@ if ($content -match "mcp-origin") {
     transport: stdio
     command: '$($venvPython -replace "\\", "/")'
     args: ['-u', '-X', 'utf8', '$($serverScript -replace "\\", "/")']
+    cwd: '$((Split-Path $serverScript -Parent) -replace "\\", "/")'
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: '1'
@@ -65,7 +128,6 @@ if ($content -match "mcp-origin") {
 }
 
 # ---------- 2) origin-plotting skill（幂等，装到 DSH skill 根目录） ----------
-$skillRoot = Join-Path $dshHome "skills"
 $dst = Join-Path $skillRoot "origin-plotting\SKILL.md"
 New-Item -ItemType Directory -Path (Split-Path $dst) -Force | Out-Null
 Copy-Item $skillFile $dst -Force

@@ -157,8 +157,8 @@ npx -y dsh-origin-plugin                # 启动 stdio MCP 服务器
 因此可从 DSH 插件市场（`dsh-market` / awesome-dsh-plugin）一键收录，也可用命令安装：
 
 ```sh
-# 方式一：从 GitHub 源码安装
-dsh plugin --profile web add github:Fantasality/dsh-origin-plugin
+# 方式一：从 GitHub 源码安装（把 <profile> 换成你要用的 profile：web / desktop / …）
+dsh plugin --profile <profile> add github:Fantasality/dsh-origin-plugin
 # 方式二：从 npm 安装（预构建分发，跳过 building 授权）
 dsh plugin add dsh-origin-plugin
 ```
@@ -173,10 +173,14 @@ dsh plugin add dsh-origin-plugin
 > （报 `... is incompatible with dsh ...`），表现和"没装"完全一样。修复步骤见
 > [COMPATIBILITY.md](COMPATIBILITY.md) §7。
 
-**v2.0.2 起 bundle 已自定位**：server 绝对路径由 `!!js` 在启动时按
-`<DSH_HOME>/profiles/web/node_modules/dsh-origin-plugin/` 计算（DSH_HOME 缺省回退
-`%USERPROFILE%/.dsh`），不再受进程工作目录影响；默认用系统 `python` 启动
-`origin_mcp_server.py`。
+**v2.9.1 起 bundle 自动定位、且不再假设 profile 名**：server 绝对路径由 `!!js` 在
+启动时按 loader 的 `ctx.baseUrl`（= 当前 profile 目录）相对推导为
+`<profile>/node_modules/dsh-origin-plugin/origin_mcp_server.py`，不再受进程工作目录影响。
+`desktop` / `headless` / 自定义 profile 名都能直接工作——v2.9.0 及更早把路径写死成
+`/profiles/web/`，在非 web profile 下 server 永远起不来（且 `failOnStartupError: false`
+让失败静默，表现就是"装了插件但没有一个 `origin_*` 工具"）。默认用系统 `python`
+启动；若插件不在该 profile 的 `node_modules` 下，可用 `DSH_ORIGIN_SERVER` 环境变量
+指定 server 绝对路径。
 
 > 📌 **安装此插件不会破坏 DSH 启动**：`failOnStartupError: false` —— server
 > 连不上只记日志、不注册工具，DSH 正常启动。这是插件市场适配的核心约束，已内置。
@@ -194,16 +198,19 @@ dsh plugin add dsh-origin-plugin
     serverName: origin
     transport: stdio
     command: 'C:/Users/<你>/dsh_origin_plugin/.venv/Scripts/python.exe'
-    args: ['-X', 'utf8', 'C:/Users/<你>/dsh_origin_plugin/origin_mcp_server.py']
+    args: ['-u', '-X', 'utf8', 'C:/Users/<你>/.dsh/profiles/<你的profile>/node_modules/dsh-origin-plugin/origin_mcp_server.py']
+    cwd: 'C:/Users/<你>/.dsh/profiles/<你的profile>/node_modules/dsh-origin-plugin'
     env:
       PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: '1'
     failOnStartupError: false
     toolCallTimeoutMs: 120000
 ```
 
 （层级：bundle patch → profile patch → `$DSH_HOME/cordis.patch.yml`，后层覆盖先层。
-若你的 DSH profile 不是默认的 `web`，把自定位路径里的 `/profiles/web/` 换成你的
-profile 名再覆盖。）
+bundle 层已按 `ctx.baseUrl` 自动定位当前 profile，**不需要知道 profile 叫什么**；
+只有插件不装在 `<profile>/node_modules` 下时，才需要覆盖 `args` 或设置
+`DSH_ORIGIN_SERVER`。）
 
 ### 3. 注册到 DSH
 
@@ -213,8 +220,10 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 
 脚本会把以下 **config-only 覆盖**（注意：没有 `name`、没有 `insert`，只替换配置，
 与 bundle 层 `mcp-origin` 合并、不产生重复条目；覆盖会整体替换 config，故带全字段）
-追加到 `%APPDATA%\dsh-desktop\harness\profiles\web\cordis.patch.yml`
-（自动备份、UTF-8 安全、幂等）：
+追加到脚本**自动探测到的 profile** 的 `cordis.patch.yml`
+（默认在 `%USERPROFILE%\.dsh\profiles\<profile>\`，同时兼容
+`%APPDATA%\dsh-desktop\harness\profiles\`；自动备份、UTF-8 安全、幂等）。
+多个 profile 都装了插件时，用 `-ProfileName <名字>` 指定：
 
 ```yaml
 - id: mcp-origin
@@ -222,9 +231,11 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
     serverName: origin
     transport: stdio
     command: 'C:/Users/<你>/dsh_origin_plugin/.venv/Scripts/python.exe'
-    args: ['-X', 'utf8', 'C:/Users/<你>/dsh_origin_plugin/origin_mcp_server.py']
+    args: ['-u', '-X', 'utf8', 'C:/Users/<你>/.dsh/profiles/<目标profile>/node_modules/dsh-origin-plugin/origin_mcp_server.py']
+    cwd: 'C:/Users/<你>/.dsh/profiles/<目标profile>/node_modules/dsh-origin-plugin'
     env:
       PYTHONIOENCODING: utf-8
+      PYTHONUNBUFFERED: '1'
     failOnStartupError: false
     toolCallTimeoutMs: 120000
 ```
@@ -234,7 +245,7 @@ powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\dsh_origin_plugin\regist
 > config-only 覆盖；如果你手工写过旧格式，请删掉那条完整 insert，只保留上面的覆盖。
 
 然后 **重启 Harness**（DSH Desktop 菜单 Harness → Restart Harness，或 `Ctrl+Shift+R`）。
-可选校验：`dsh --profile web --dump-config` 能看到 `mcp-origin` 条目。
+可选校验：`dsh --profile <你的profile> --dump-config` 能看到 `mcp-origin` 条目。
 
 > 机制说明：DSH 的插件生态是 Cordis 插件树 + `cordis.patch.yml` patch 层；MCP 服务器是官方
 > 一等公民——`dsh-mcp-client` 会自动把外部 MCP 工具桥接为原生工具
@@ -654,7 +665,7 @@ set ORIGIN_SESSION=isolated
 - [ ] `--mcp-test` 输出 `MCP-TEST OK`（50 工具可见，view_graph 返回 image 内容）
 - [ ] `origin_view_graph` 的返回能被识图模型正确读出轴标题/图型/配色
 - [ ] `mcp_handshake_test.mjs` 输出 `HANDSHAKE-TEST OK`
-- [ ] `register_to_dsh.ps1` 执行成功，`dsh --profile web --dump-config` 可见 mcp-origin
+- [ ] `register_to_dsh.ps1` 执行成功，`dsh --profile <你的profile> --dump-config` 可见 mcp-origin
 - [ ] 重启 Harness 后新对话触发画图，返回 PNG 路径且图片内容正确
 - [ ] 同时开 2~3 个对话各画不同图，互不干扰
 
