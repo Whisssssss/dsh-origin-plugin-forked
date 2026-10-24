@@ -307,7 +307,7 @@ def origin_write_data(columns: dict, worksheet: str = "") -> dict:
 
 
 @mcp.tool()
-def origin_read_worksheet(worksheet: str, columns: list = None, max_rows: int = None) -> dict:
+def origin_read_worksheet(worksheet: str, columns: list[str | int] = None, max_rows: int = None) -> dict:
     """读取工作表列数据。
 
     Args:
@@ -339,7 +339,7 @@ def origin_column_formula(worksheet: str, target, formula: str,
 @mcp.tool()
 def origin_peak_fit(worksheet: str, x_column: str = "", y_column: str = "",
                     n_peaks: int = 1, kind: str = "gauss",
-                    centers_hint: list = None, plot_curve: bool = True,
+                    centers_hint: list[float] = None, plot_curve: bool = True,
                     graph: str = "", title: str = "",
                     show_components: bool = True) -> dict:
     """多峰拟合（核磁/XPS/拉曼/红外分峰解析，numpy LM 自包含实现）。
@@ -356,7 +356,7 @@ def origin_peak_fit(worksheet: str, x_column: str = "", y_column: str = "",
 
 
 @mcp.tool()
-def origin_mask_points(worksheet: str, y_column: str = "", rows: list = None,
+def origin_mask_points(worksheet: str, y_column: str = "", rows: list[int] = None,
                        x_min: float = None, x_max: float = None,
                        x_column: str = "", backup: bool = True) -> dict:
     """屏蔽指定数据点（置 NaN，图上自动隐藏；backup=True 先备份原列，可逆）。
@@ -557,7 +557,7 @@ def origin_template_search(keyword: str, max_items: int = 5,
 @mcp.tool()
 def origin_figure(columns: dict = None, data_source: str = "",
                   intent: str = "auto", plot_type: str = "",
-                  x_column: str = "", y_columns: list = None,
+                  x_column: str = "", y_columns: list[str | int] = None,
                   style_mode: str = "default", family: str = "",
                   fmt: str = "png", file_path: str = "", output_dir: str = "",
                   width: int = 1200, graph_name: str = "", title: str = "",
@@ -664,7 +664,7 @@ def origin_warmup(start_origin: bool = True) -> dict:
 
 @mcp.tool()
 def origin_pages_gc(threshold: int = 200, dry_run: bool = True,
-                    baseline: list = None) -> dict:
+                    baseline: list[str] = None) -> dict:
     """页堆积治理：项目页超阈值时报告（dry_run=true）或清理（false）。
 
     传 baseline（页面短名列表快照）时只清理快照之后新增的页面，绝不 closeAll，
@@ -726,7 +726,7 @@ def origin_layout_info(graph: str, width_px: int = 1100) -> dict:
 
 
 @mcp.tool()
-def origin_annotate(graph: str, items: list, style: dict = None) -> dict:
+def origin_annotate(graph: str, items: list[dict], style: dict = None) -> dict:
     """批量文本标注：一次调用加 N 个文本，统一样式，返回逐项落位与对象名。
 
     items: [{"text":"...","x":数据坐标,"y":数据坐标,"size"?:7,"color"?:Origin色号,"bold"?:false}]
@@ -738,9 +738,9 @@ def origin_annotate(graph: str, items: list, style: dict = None) -> dict:
 
 
 @mcp.tool()
-def origin_simulate(kind: str = "lorentzian", centers: list = None,
-                    widths: list = None, heights: list = None,
-                    n_points: int = 2000, x_range: list = None,
+def origin_simulate(kind: str = "lorentzian", centers: list[float] = None,
+                    widths: list[float] = None, heights: list[float] = None,
+                    n_points: int = 2000, x_range: list[float] = None,
                     noise: float = 0.01, seed: int = None,
                     x_label: str = "x", y_label: str = "y_simulated") -> dict:
     """物理模型谱图模拟（多峰+噪声，纯计算）。返回 columns 可直接喂 origin_figure。
@@ -756,7 +756,7 @@ def origin_simulate(kind: str = "lorentzian", centers: list = None,
 
 
 @mcp.tool()
-def origin_find_peaks(x_list: list, y_list: list, top_n: int = 5,
+def origin_find_peaks(x_list: list[float], y_list: list[float], top_n: int = 5,
                       min_height_frac: float = 0.05,
                       label_template: str = "{x:.2f}", x_prefix: str = "") -> dict:
     """找局部极大峰（numpy）。返回 peaks=[{x,y,label}]，可直接转 origin_annotate
@@ -790,7 +790,7 @@ def origin_load_file(path: str, worksheet: str = "", sheet: str = "",
 @mcp.tool()
 def origin_plot_plan(columns: dict, plot_type: str = "line",
                      style_mode: str = "default", family: str = "",
-                     x_column: str = "", y_columns: list = None,
+                     x_column: str = "", y_columns: list[str | int] = None,
                      yerr_column: str = "", title: str = "", fmt: str = "png",
                      graph_name: str = "") -> dict:
     """生成绘图计划（不连 Origin，离线秒回）。数据含义不确定时先走这一步。
@@ -858,7 +858,7 @@ _PLOT_ARGS = """    Args:
 
 @mcp.tool()
 def origin_plot(worksheet: str, plot_type: str = "line",
-                x_column: str = "", y_columns: list = None, title: str = "",
+                x_column: str = "", y_columns: list[str | int] = None, title: str = "",
                 yerr_column: str = "", graph_name: str = "",
                 style_mode: str = "default", family: str = "",
                 style_overrides: dict = None) -> dict:
@@ -891,7 +891,7 @@ def origin_plot(worksheet: str, plot_type: str = "line",
 @mcp.tool()
 def origin_plot_file(columns: dict, plot_type: str = "line", fmt: str = "png",
                      file_path: str = "", width: int = 1200,
-                     x_column: str = "", y_columns: list = None, title: str = "",
+                     x_column: str = "", y_columns: list[str | int] = None, title: str = "",
                      graph_name: str = "", style_mode: str = "default",
                      family: str = "", style_overrides: dict = None) -> dict:
     """一键完成：写数据 -> 画图 -> 导出文件（最常用，但**会落盘**）。
@@ -1036,7 +1036,7 @@ def origin_view_graph(graph: str = "", max_width: int = 1400) -> list:
 
 @mcp.tool()
 def origin_apply_style(graph: str, plot_type: str = "line",
-                       columns: list = None, style_mode: str = "default",
+                       columns: list[str | int] = None, style_mode: str = "default",
                        family: str = "", style_overrides: dict = None) -> dict:
     """对已有图应用排版/调色板/多序列区分。
 
@@ -1063,7 +1063,7 @@ def origin_apply_style(graph: str, plot_type: str = "line",
 def origin_verify_graph(graph: str = "", expected_x_title: str = "",
                         expected_y_title: str = "", min_font_pt: float = None,
                         expected_series: int = None, legend_visible: bool = None,
-                        files: list = None, allow_full_overlap: bool = False) -> dict:
+                        files: list[str] = None, allow_full_overlap: bool = False) -> dict:
     """确定性反读核验（程序把图页对象属性读回来逐项比对）。
 
     与 origin_view_graph（模型看渲染图）互补，双保险。检查项：图层/曲线数、
@@ -1091,8 +1091,8 @@ def origin_verify_graph(graph: str = "", expected_x_title: str = "",
 
 
 @mcp.tool()
-def origin_save_project(path: str, pages: list = None,
-                        exclude: list = None) -> dict:
+def origin_save_project(path: str, pages: list[str] = None,
+                        exclude: list[str] = None) -> dict:
     """保存当前 Origin 项目为可编辑 OPJU（正式交付物，可在 Origin 中继续编辑）。
 
     注意：当前版本**只支持全量保存**（Origin 没有稳定的选择性另存 COM 通道）。
@@ -1162,7 +1162,7 @@ def origin_inspect_graph(graph: str = "", max_plots: int = 40) -> dict:
 
 
 @mcp.tool()
-def origin_edit_plot(graph: str, edits: list) -> dict:
+def origin_edit_plot(graph: str, edits: list[dict]) -> dict:
     """逐条微调曲线（新手最常用：换颜色 / 加粗 / 改线型 / 换符号 / 半透明 / 隐藏）。
 
     Args:
@@ -1249,7 +1249,7 @@ def origin_edit_page(graph: str, page_size_cm: dict = None, background: int = No
 
 
 @mcp.tool()
-def origin_manage_pages(action: str, pages: list = None, new_name: str = "") -> dict:
+def origin_manage_pages(action: str, pages: list[str] = None, new_name: str = "") -> dict:
     """窗口管理：关闭 / 激活 / 重命名 / 隐藏 / 显示 / 复制页面（含工作簿与图页）。
 
     典型用法："把多余的两个空工作簿关掉" → action='close', pages=['Book3','Book4']。
@@ -1286,7 +1286,7 @@ def origin_add_text(graph: str, text: str, x: float = None, y: float = None) -> 
 # 数据编辑
 # ---------------------------------------------------------------------------
 @mcp.tool()
-def origin_filter_data(worksheet: str, drop_rows: list = None,
+def origin_filter_data(worksheet: str, drop_rows: list[int] = None,
                        x_column: str = "", x_min: float = None,
                        x_max: float = None) -> dict:
     """删除/裁剪数据点（写回原工作表）。"""
@@ -1325,7 +1325,7 @@ def origin_fit(worksheet: str, x_column: str = "", y_column: str = "",
 
 
 @mcp.tool()
-def origin_stats(worksheet: str, columns: list = None) -> dict:
+def origin_stats(worksheet: str, columns: list[str | int] = None) -> dict:
     """描述性统计：count/mean/std/min/p25/median/p75/max/skew。"""
     return engine.stats(worksheet, columns=columns)
 
@@ -1333,7 +1333,7 @@ def origin_stats(worksheet: str, columns: list = None) -> dict:
 @mcp.tool()
 def origin_transform(worksheet: str, column: str = "", op: str = "smooth",
                      window: int = 5, method: str = "moving",
-                     new_x: list = None, write_back: bool = True,
+                     new_x: list[float] = None, write_back: bool = True,
                      return_values: bool = True) -> dict:
     """数据变换（结果写入新列或返回）。
 
@@ -1369,7 +1369,7 @@ def origin_fft(worksheet: str, x_column: str = "", y_column: str = "",
 
 
 @mcp.tool()
-def origin_correlate(worksheet: str, columns: list = None) -> dict:
+def origin_correlate(worksheet: str, columns: list[str | int] = None) -> dict:
     """列间 Pearson 相关矩阵。"""
     return engine.correlate(worksheet, columns=columns)
 
@@ -1407,12 +1407,12 @@ if _EXTENDED:
                             kind=k, mu=mu)
 
     @mcp.tool()
-    def origin_anova(worksheet: str, columns: list) -> dict:
+    def origin_anova(worksheet: str, columns: list[str | int]) -> dict:
         """单因素方差分析（ANOVA）：每组一列，返回 F 与 p 值。"""
         return engine.anova(worksheet, columns=columns)
 
     @mcp.tool()
-    def origin_pca(worksheet: str, columns: list = None, scale: bool = False,
+    def origin_pca(worksheet: str, columns: list[str | int] = None, scale: bool = False,
                    n_components: int = None) -> dict:
         """主成分分析（把每列当作变量、每行为样本）。
 

@@ -28,3 +28,5 @@ build/
 *.egg-info/
 build/
 *.egg-info/
+logs/engine.log
+origin_mcp_server.py.bak-20261022-153249
